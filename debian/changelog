@@ -1,8 +1,9 @@
 swift (2.2.0-4) unstable; urgency=medium
 
   * Fixed service name of object-expirer.
+  * Added container-sync init script.
 
- -- Ondrej Novy <ondrej.novy@firma.seznam.cz>  Mon, 07 Sep 2015 09:05:10
+ -- Ondrej Novy <ondrej.novy@firma.seznam.cz>  Mon, 10 Sep 2015 09:05:10
 0200
 
 swift (2.2.0-3) unstable; urgency=medium
