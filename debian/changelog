@@ -1,14 +1,6 @@
-swift (2.3.0-2) unstable; urgency=medium
+swift (2.3.0-1) UNRELEASED; urgency=medium
 
-  * swift-object-reconstructor init script is correctly installed now.
-  * Fixed service name of object-expirer.
-  * Added container-sync init script.
-  * All init scripts is using swift-init.
-
- -- Ondrej Novy <ondrej.novy@firma.seznam.cz>  Mon, 09 Sep 2015 09:05:10 +0200
-
-swift (2.3.0-1) unstable; urgency=medium
-
+  [ Thomas Goirand ]
   * New upstream release.
   * Added python-pyeclib as (build-)depends, bumped eventlet required version
     to 0.16.1, and removed a few versions already provided by Jessie.
@@ -19,6 +11,12 @@ swift (2.3.0-1) unstable; urgency=medium
   * Added startup scripts for swift-container-reconciler and
     swift-object-reconstructor. Thanks to <ondrej.novy@firma.seznam.cz> for the
     bug report and patch (Closes: #788450).
+
+  [ Ondrej Novy]
+  * swift-object-reconstructor init script is correctly installed now.
+  * Fixed service name of object-expirer.
+  * Added container-sync init script.
+  * All init scripts is using swift-init.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 04 Jun 2015 09:49:04 +0200
 
