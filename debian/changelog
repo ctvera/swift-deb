@@ -1,14 +1,11 @@
-swift (2.2.0-4) unstable; urgency=medium
+swift (2.2.0-3) UNRELEASED; urgency=medium
 
+  [ Thomas Goirand ]
+  * Fixed swift user creation (standardized on pkgos way).
+
+  [ Ondrej Novy ]
   * Fixed service name of object-expirer.
   * Added container-sync init script.
-
- -- Ondrej Novy <ondrej.novy@firma.seznam.cz>  Mon, 10 Sep 2015 09:05:10
-0200
-
-swift (2.2.0-3) unstable; urgency=medium
-
-  * Fixed swift user creation (standardized on pkgos way).
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 30 Jun 2015 17:03:05 +0200
 
