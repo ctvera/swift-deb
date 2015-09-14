@@ -1,1 +1,2 @@
 CVE-2015-1856_Prevent-unauthorized-delete-in-versioned-container.patch
+CVE-2015-5223_Disallow-unsafe-tempurl-operations-to-point-to-unauthorized-data.patch
