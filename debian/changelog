@@ -1,7 +1,10 @@
-swift (2.2.0-3) UNRELEASED; urgency=medium
+swift (2.2.0-1+deb8u1) jessie-proposed-updates; urgency=medium
 
   [ Thomas Goirand ]
   * Fixed swift user creation (standardized on pkgos way).
+  * CVE-2015-1856 & OSSA 2015-006: Unauthorized delete of versioned Swift
+    object. Applied upstream patch: Prevent unauthorized delete in versioned
+    container (Closes: #783163).
 
   [ Ondřej Nový ]
   * Fixed service name of object-expirer.
@@ -10,15 +13,7 @@ swift (2.2.0-3) UNRELEASED; urgency=medium
     Applied upstream patch: Disallow unsafe tempurl operations to point
     to unauthorized data (Closes: #797032).
 
- -- Thomas Goirand <zigo@debian.org>  Tue, 30 Jun 2015 17:03:05 +0200
-
-swift (2.2.0-2) unstable; urgency=high
-
-  * CVE-2015-1856 & OSSA 2015-006: Unauthorized delete of versioned Swift
-    object. Applied upstream patch: Prevent unauthorized delete in versioned
-    container (Closes: #783163).
-
- -- Thomas Goirand <zigo@debian.org>  Thu, 23 Apr 2015 09:42:47 +0200
+ -- Thomas Goirand <zigo@debian.org>  Tue, 15 Sep 2015 21:28:14 +0200
 
 swift (2.2.0-1) unstable; urgency=medium
 
