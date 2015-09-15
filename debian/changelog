@@ -3,7 +3,7 @@ swift (2.2.0-3) UNRELEASED; urgency=medium
   [ Thomas Goirand ]
   * Fixed swift user creation (standardized on pkgos way).
 
-  [ Ondrej Novy ]
+  [ Ondřej Nový ]
   * Fixed service name of object-expirer.
   * Added container-sync init script.
   * CVE-2015-5223: Information leak via Swift tempurls.
