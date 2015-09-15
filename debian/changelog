@@ -12,7 +12,7 @@ swift (2.3.0-1) UNRELEASED; urgency=medium
     swift-object-reconstructor. Thanks to <ondrej.novy@firma.seznam.cz> for the
     bug report and patch (Closes: #788450).
 
-  [ Ondrej Novy]
+  [ Ondřej Nový]
   * swift-object-reconstructor init script is correctly installed now.
   * Fixed service name of object-expirer.
   * Added container-sync init script.
