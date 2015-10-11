@@ -17,6 +17,8 @@ swift (2.3.0-1) UNRELEASED; urgency=medium
   * Fixed service name of object-expirer.
   * Added container-sync init script.
   * All init scripts is using swift-init.
+  * Workaround swift-init bug and send SIGKILL if SIGTERM is not successfull.
+    Thanks to Petr Kuběna <petr.kubena@firma.seznam.cz>
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 04 Jun 2015 09:49:04 +0200
 
