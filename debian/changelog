@@ -21,6 +21,7 @@ swift (2.3.0-1) UNRELEASED; urgency=medium
     Thanks to Petr Kuběna <petr.kubena@firma.seznam.cz>
   * Moved same parts of init scripts to global lib.
   * Allow to change kill-interval in swift-init.
+  * man pages cleanup.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 04 Jun 2015 09:49:04 +0200
 
