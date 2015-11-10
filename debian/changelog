@@ -22,6 +22,7 @@ swift (2.3.0-1) UNRELEASED; urgency=medium
   * Moved same parts of init scripts to template.
   * Allow to change kill-interval in swift-init.
   * man pages cleanup.
+  * Added cron job for drive audit.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 04 Jun 2015 09:49:04 +0200
 
