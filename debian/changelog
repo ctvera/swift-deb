@@ -1,3 +1,10 @@
+swift (2.7.0-10~bpo8+2) jessie-backports; urgency=medium
+
+  * Run swift-drive-audit cron by root
+    (needed for /var/log/kern.log reading and umount command)
+
+ -- Ondřej Nový <onovy@debian.org>  Mon, 17 Oct 2016 14:45:54 +0200
+
 swift (2.7.0-10~bpo8+1) jessie-backports; urgency=medium
 
   * Rebuild for jessie-backports.
