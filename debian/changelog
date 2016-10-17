@@ -2,6 +2,13 @@ swift (2.7.0-10~bpo8+2) jessie-backports; urgency=medium
 
   * Run swift-drive-audit cron by root
     (needed for /var/log/kern.log reading and umount command)
+  * Added upstream stable patches:
+    - Fix_upgrade_bug_in_versioned_writes.patch
+      (https://review.openstack.org/#/c/302462/)
+    - Igore_auditor_status_files_to_prevent_replicator_reports.patch
+      (https://review.openstack.org/#/c/362514/)
+    - Stop_complaining_about_auditor_status_files.patch
+      (https://review.openstack.org/#/c/363855/)
 
  -- Ondřej Nový <onovy@debian.org>  Mon, 17 Oct 2016 14:45:54 +0200
 

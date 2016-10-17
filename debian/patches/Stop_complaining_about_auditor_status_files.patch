@@ -1,0 +1,88 @@
+From 06c385cac36223e044df72d9e74d07809cb1f0e7 Mon Sep 17 00:00:00 2001
+From: Tim Burke <tim.burke@gmail.com>
+Date: Wed, 11 May 2016 19:54:47 -0700
+Subject: [PATCH] Stop complaining about auditor_status files
+
+Following fd86d5a, the object-auditor would leave status files so it
+could resume where it left off if restarted. However, this would also
+cause the object-reconstructor to print warnings like:
+
+  Unexpected entity in data dir: u'/srv/node4/sdb8/objects/auditor_status_ZBF.json'
+
+...which isn't actually terribly useful or actionable. The auditor will
+clean it up (eventually); the operator doesn't have to do anything.
+
+Now, the reconstructor will specifically ignore those status files.
+
+Partial-Bug: 1583305
+Change-Id: I2f3d0bd2f1e242db6eb263c7755f1363d1430048
+(cherry picked from commit ad16e2c77bb61bdf51a7d3b2c258daf69bfc74da)
+---
+ swift/obj/reconstructor.py          |  3 +++
+ test/unit/obj/test_reconstructor.py | 39 +++++++++++++++++++++++++++++++++++--
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/swift/obj/reconstructor.py b/swift/obj/reconstructor.py
+index e2ad368..c533e25 100644
+--- a/swift/obj/reconstructor.py
++++ b/swift/obj/reconstructor.py
+@@ -843,6 +843,9 @@ def collect_parts(self, override_devices=None,
+                 self.part_count += len(partitions)
+                 for partition in partitions:
+                     part_path = join(obj_path, partition)
++                    if partition in ('auditor_status_ALL.json',
++                                     'auditor_status_ZBF.json'):
++                        continue
+                     if not (partition.isdigit() and
+                             os.path.isdir(part_path)):
+                         self.logger.warning(
+diff --git a/test/unit/obj/test_reconstructor.py b/test/unit/obj/test_reconstructor.py
+index 19fc1f8..67b7d44 100755
+--- a/test/unit/obj/test_reconstructor.py
++++ b/test/unit/obj/test_reconstructor.py
+@@ -823,8 +823,43 @@ def test_removes_zbf(self):
+         self.assertFalse(os.path.exists(pol_1_part_1_path))
+         warnings = self.reconstructor.logger.get_lines_for_level('warning')
+         self.assertEqual(1, len(warnings))
+-        self.assertTrue('Unexpected entity in data dir:' in warnings[0],
+-                        'Warning not found in %s' % warnings)
++        self.assertIn('Unexpected entity in data dir:', warnings[0])
++
++    def test_ignores_status_file(self):
++        # Following fd86d5a, the auditor will leave status files on each device
++        # until an audit can complete. The reconstructor should ignore these
++
++        @contextmanager
++        def status_files(*auditor_types):
++            status_paths = [os.path.join(self.objects_1,
++                                         'auditor_status_%s.json' % typ)
++                            for typ in auditor_types]
++            for status_path in status_paths:
++                self.assertFalse(os.path.exists(status_path))  # sanity check
++                with open(status_path, 'w'):
++                    pass
++                self.assertTrue(os.path.isfile(status_path))  # sanity check
++            try:
++                yield status_paths
++            finally:
++                for status_path in status_paths:
++                    try:
++                        os.unlink(status_path)
++                    except OSError as e:
++                        if e.errno != 2:
++                            raise
++
++        # since our collect_parts job is a generator, that yields directly
++        # into build_jobs and then spawns it's safe to do the remove_files
++        # without making reconstructor startup slow
++        with status_files('ALL', 'ZBF') as status_paths:
++            self.reconstructor._reset_stats()
++            for part_info in self.reconstructor.collect_parts():
++                self.assertNotIn(part_info['part_path'], status_paths)
++            warnings = self.reconstructor.logger.get_lines_for_level('warning')
++            self.assertEqual(0, len(warnings))
++            for status_path in status_paths:
++                self.assertTrue(os.path.exists(status_path))
+ 
+     def _make_fake_ssync(self, ssync_calls):
+         class _fake_ssync(object):

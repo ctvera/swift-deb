@@ -1,0 +1,132 @@
+From 2c39cc9990fc2a2f3fac9a15c79c10e8fdb1b1fc Mon Sep 17 00:00:00 2001
+From: Charles Hsu <charles0126@gmail.com>
+Date: Thu, 11 Aug 2016 00:53:13 +0800
+Subject: [PATCH] Ignore auditor status files to prevent replicator reports
+ errors
+
+Ignore `auditor_status_*.json` files during the collecting jobs
+and replicator won't use these wrong paths to find objects that
+causes an exception to increase failure count in replicator report.
+
+Co-Authored-By: Clay Gerrard <clay.gerrard@gmail.com>
+Co-Authored-By: Mark Kirkwood <mark.kirkwood@catalyst.net.nz>
+
+Change-Id: Ib15a0987288d9ee32432c1998aefe638ca3b223b
+Closes-Bug: #1583305
+(cherry picked from commit 65b1820407ea40bd7d65a5356a58a689befe3cb5)
+---
+ swift/obj/replicator.py          |  9 +++++++--
+ test/unit/obj/test_replicator.py | 37 +++++++++++++++++++++++++++++++++++--
+ 2 files changed, 42 insertions(+), 4 deletions(-)
+
+diff --git a/swift/obj/replicator.py b/swift/obj/replicator.py
+index ff89b32..104f5c3 100644
+--- a/swift/obj/replicator.py
++++ b/swift/obj/replicator.py
+@@ -356,12 +356,12 @@ def tpool_get_suffixes(path):
+                 handoff_partition_deleted = True
+         except (Exception, Timeout):
+             self.logger.exception(_("Error syncing handoff partition"))
++            self._add_failure_stats(failure_devs_info)
+         finally:
+             target_devs_info = set([(target_dev['replication_ip'],
+                                      target_dev['device'])
+                                     for target_dev in job['nodes']])
+             self.stats['success'] += len(target_devs_info - failure_devs_info)
+-            self._add_failure_stats(failure_devs_info)
+             if not handoff_partition_deleted:
+                 self.handoffs_remaining += 1
+             self.partition_times.append(time.time() - begin)
+@@ -489,10 +489,10 @@ def update(self, job):
+             self.suffix_count += len(local_hash)
+         except (Exception, Timeout):
+             failure_devs_info.update(target_devs_info)
++            self._add_failure_stats(failure_devs_info)
+             self.logger.exception(_("Error syncing partition"))
+         finally:
+             self.stats['success'] += len(target_devs_info - failure_devs_info)
+-            self._add_failure_stats(failure_devs_info)
+             self.partition_times.append(time.time() - begin)
+             self.logger.timing_since('partition.update.timing', begin)
+ 
+@@ -611,6 +611,11 @@ def build_replication_jobs(self, policy, ips, override_devices=None,
+                         and partition not in override_partitions):
+                     continue
+ 
++                if (partition.startswith('auditor_status_') and
++                        partition.endswith('.json')):
++                    # ignore auditor status files
++                    continue
++
+                 part_nodes = None
+                 try:
+                     job_path = join(obj_path, partition)
+diff --git a/test/unit/obj/test_replicator.py b/test/unit/obj/test_replicator.py
+index a32fa99..413c631 100644
+--- a/test/unit/obj/test_replicator.py
++++ b/test/unit/obj/test_replicator.py
+@@ -234,7 +234,7 @@ def test_handoff_replication_setting_warnings(self):
+                                  config,
+                              ))
+ 
+-    def _write_disk_data(self, disk_name):
++    def _write_disk_data(self, disk_name, with_json=False):
+         os.mkdir(os.path.join(self.devices, disk_name))
+         objects = os.path.join(self.devices, disk_name,
+                                diskfile.get_data_dir(POLICIES[0]))
+@@ -250,6 +250,13 @@ def _write_disk_data(self, disk_name):
+             parts_1[part] = os.path.join(objects_1, part)
+             os.mkdir(parts_1[part])
+ 
++        if with_json:
++            for json_file in ['auditor_status_ZBF.json',
++                              'auditor_status_ALL.json']:
++                for obj_dir in [objects, objects_1]:
++                    with open(os.path.join(obj_dir, json_file), 'w'):
++                        pass
++
+         return objects, objects_1, parts, parts_1
+ 
+     def _create_replicator(self):
+@@ -417,6 +424,32 @@ def test_collect_jobs(self):
+             self.assertEqual(jobs_by_pol_part[part]['path'],
+                              os.path.join(self.objects_1, part[1:]))
+ 
++    def test_collect_jobs_failure_report_with_auditor_stats_json(self):
++        devs = [
++            {'id': 0, 'device': 'sda', 'zone': 0,
++             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
++             'replication_ip': '127.0.0.0', 'replication_port': 6000},
++            {'id': 1, 'device': 'sdb', 'zone': 1,
++             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
++             'replication_ip': '127.0.0.0', 'replication_port': 6000},
++            {'id': 2, 'device': 'sdc', 'zone': 2,
++             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
++             'replication_ip': '127.0.0.1', 'replication_port': 6000},
++            {'id': 3, 'device': 'sdd', 'zone': 3,
++             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
++             'replication_ip': '127.0.0.1', 'replication_port': 6000},
++        ]
++        objects_sdb, objects_1_sdb, _, _ = \
++            self._write_disk_data('sdb', with_json=True)
++        objects_sdc, objects_1_sdc, _, _ = \
++            self._write_disk_data('sdc', with_json=True)
++        objects_sdd, objects_1_sdd, _, _ = \
++            self._write_disk_data('sdd', with_json=True)
++        _create_test_rings(self.testdir, devs)
++
++        self.replicator.collect_jobs()
++        self.assertEqual(self.replicator.stats['failure'], 0)
++
+     @mock.patch('swift.obj.replicator.random.shuffle', side_effect=lambda l: l)
+     def test_collect_jobs_multi_disk(self, mock_shuffle):
+         devs = [
+@@ -1555,7 +1588,7 @@ def fake_get_hashes(*args, **kwargs):
+                 return 2, {'abc': 'def'}
+ 
+             def fake_exc(tester, *args, **kwargs):
+-                if 'Error syncing partition' in args[0]:
++                if 'Error syncing partition timeout' in args[0]:
+                     tester.i_failed = True
+ 
+             self.i_failed = False
