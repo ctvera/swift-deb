@@ -1,4 +1,10 @@
-swift (2.7.0-10~bpo8+1+szn1) jessie-backports; urgency=medium
+swift (2.7.0-10~bpo8+1+szn2) Seznam; urgency=medium
+
+  * Set owner of drive-audit recon cache to swift user 
+
+ -- Petr Kubena <petr.kubena@firma.seznam.cz>  Fri, 04 Nov 2016 13:30:17 +0100
+
+swift (2.7.0-10~bpo8+1+szn1) Seznam; urgency=medium
 
   * Run swift-drive-audit cron by root
     (needed for /var/log/kern.log reading and umount command)

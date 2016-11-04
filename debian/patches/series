@@ -3,3 +3,4 @@ syslog_log_name.patch
 Fix_upgrade_bug_in_versioned_writes.patch
 Ignore_auditor_status_files_to_prevent_replicator_reports.patch
 Stop_complaining_about_auditor_status_files.patch
+set_owner_of_drive_audit.patch

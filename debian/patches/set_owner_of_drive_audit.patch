@@ -1,0 +1,110 @@
+From 9847796f01571dc7be332707dc935efac66ee5d4 Mon Sep 17 00:00:00 2001
+From: Ondřej Nový <ondrej.novy@firma.seznam.cz>
+Date: Mon, 17 Oct 2016 19:46:57 +0200
+Subject: [PATCH] Set owner of drive-audit recon cache to swift user
+
+Fixies this problem:
+* swift-drive-audit needs to be run by root, because only root have
+  "umount" permission
+* swift-object servers typically runs as user swift
+* if swift-drive-audit is run by root, /var/cache/swift/drive.recon is
+  owned by root, with 0o600
+* recon middleware (inside swift-object-server) can't read this cache
+  file: swift-object: Error reading recon cache file
+
+This patch adds "user" option to drive-audit config file. Recon cache
+is chowned to this user.
+
+Change-Id: Ibf20543ee690b7c5a37fabd1540fd5c0c7b638c9
+---
+
+--- a/bin/swift-drive-audit
++++ b/bin/swift-drive-audit
+@@ -208,7 +208,8 @@
+                     total_errors += count
+     recon_file = recon_cache_path + "/drive.recon"
+     dump_recon_cache(recon_errors, recon_file, logger)
+-    dump_recon_cache({'drive_audit_errors': total_errors}, recon_file, logger)
++    dump_recon_cache({'drive_audit_errors': total_errors}, recon_file, logger,
++                     set_owner=conf.get("user", "swift"))
+ 
+     if unmounts == 0:
+         logger.info("No drives were unmounted")
+--- a/doc/source/admin_guide.rst
++++ b/doc/source/admin_guide.rst
+@@ -212,6 +212,8 @@
+ ==================  ==============  ===========================================
+ Option              Default         Description
+ ------------------  --------------  -------------------------------------------
++user                swift           Drop privileges to this user for non-root
++                                    tasks
+ log_facility        LOG_LOCAL0      Syslog log facility
+ log_level           INFO            Log level
+ device_dir          /srv/node       Directory devices are mounted under
+--- a/etc/drive-audit.conf-sample
++++ b/etc/drive-audit.conf-sample
+@@ -1,4 +1,5 @@
+ [drive-audit]
++# user = swift
+ # device_dir = /srv/node
+ #
+ # You can specify default log routing here if you want:
+--- a/swift/common/utils.py
++++ b/swift/common/utils.py
+@@ -2789,13 +2789,15 @@
+         cache_entry[key] = item
+ 
+ 
+-def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2):
++def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2,
++                     set_owner=None):
+     """Update recon cache values
+ 
+     :param cache_dict: Dictionary of cache key/value pairs to write out
+     :param cache_file: cache file to update
+     :param logger: the logger to use to log an encountered error
+     :param lock_timeout: timeout (in seconds)
++    :param set_owner: Set owner of recon cache file
+     """
+     try:
+         with lock_file(cache_file, lock_timeout, unlink=False) as cf:
+@@ -2814,6 +2816,8 @@
+                 with NamedTemporaryFile(dir=os.path.dirname(cache_file),
+                                         delete=False) as tf:
+                     tf.write(json.dumps(cache_entry) + '\n')
++                if set_owner:
++                    os.chown(tf.name, pwd.getpwnam(set_owner).pw_uid, -1)
+                 renamer(tf.name, cache_file, fsync=False)
+             finally:
+                 if tf is not None:
+--- a/test/unit/common/test_utils.py
++++ b/test/unit/common/test_utils.py
+@@ -1335,6 +1335,28 @@
+         finally:
+             rmtree(testdir_base)
+ 
++    def test_dump_recon_cache_set_owner(self):
++        testdir_base = mkdtemp()
++        testcache_file = os.path.join(testdir_base, 'cache.recon')
++        logger = utils.get_logger(None, 'server', log_route='server')
++        try:
++            submit_dict = {'key1': {'value1': 1, 'value2': 2}}
++
++            _ret = lambda: None
++            _ret.pw_uid = 100
++            _mock_getpwnam = MagicMock(return_value=_ret)
++            _mock_chown = mock.Mock()
++
++            with patch('os.chown', _mock_chown), \
++                    patch('pwd.getpwnam', _mock_getpwnam):
++                utils.dump_recon_cache(submit_dict, testcache_file,
++                                       logger, set_owner="swift")
++
++            _mock_getpwnam.assert_called_once_with("swift")
++            self.assertEqual(_mock_chown.call_args[0][1], 100)
++        finally:
++            rmtree(testdir_base)
++
+     def test_dump_recon_cache_permission_denied(self):
+         testdir_base = mkdtemp()
+         testcache_file = os.path.join(testdir_base, 'cache.recon')
