@@ -1,0 +1,77 @@
+From b0d158192018b30088190cef3ae666ac65059851 Mon Sep 17 00:00:00 2001
+From: Pavel Kvasnička <pavel.kvasnicka@firma.seznam.cz>
+Date: Wed, 23 Nov 2016 16:41:11 +0100
+Subject: [PATCH] Fixed regression in consolidate_hashes
+
+Occurs when a new file is stored to new suffix to not empty partition.
+Then suffix is added to an invalidations file but not into hashes
+pickle file. When a replication of this partition runs, replication of
+suffix is completed on first and each 10th run of replicator. Rsync
+runs on each new suffix because destination does not return hash of
+new suffix although suffix content is in the same state.
+This bug was introduced in 2.7.0
+
+Change-Id: Ie2700f6e6171f2ecfa7d07b0f18b79e90cbf1c8a
+Closes-Bug: #1634967
+---
+
+--- a/swift/obj/diskfile.py
++++ b/swift/obj/diskfile.py
+@@ -268,7 +268,8 @@
+             with open(invalidations_file, 'rb') as inv_fh:
+                 for line in inv_fh:
+                     suffix = line.strip()
+-                    if hashes is not None and hashes.get(suffix) is not None:
++                    if hashes is not None and \
++                            hashes.get(suffix, '') is not None:
+                         hashes[suffix] = None
+                         modified = True
+         except (IOError, OSError) as e:
+--- a/test/unit/obj/test_diskfile.py
++++ b/test/unit/obj/test_diskfile.py
+@@ -4807,6 +4807,45 @@
+             self.assertFalse(os.path.exists(hashes_file))
+             self.assertFalse(os.path.exists(inv_file))
+ 
++    def test_delete_when_empty_pkl(self):
++        for policy in self.iter_policies():
++            df_mgr = self.df_router[policy]
++            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
++            self.assertEqual(hashes, {})
++            # create something to hash
++            df = df_mgr.get_diskfile('sda1', '0', 'a', 'c', 'o',
++                                     policy=policy)
++            df.delete(self.ts())
++            suffix_dir = os.path.dirname(df._datadir)
++            suffix = os.path.basename(suffix_dir)
++            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
++            self.assertIn(suffix, hashes)  # sanity
++
++    def test_delete_when_suffix_hash_not_in_existing_pkl(self):
++        for policy in self.iter_policies():
++            df_mgr = self.df_router[policy]
++            # create something to hash
++            df = df_mgr.get_diskfile('sda1', '0', 'a', 'c', 'o',
++                                     policy=policy)
++            i = 0
++            while True:
++                df2 = df_mgr.get_diskfile('sda1', '0', 'a', 'c', 'o%d' % i,
++                                          policy=policy)
++                i += 1
++                if df._datadir != df2._datadir:
++                    break
++            df.delete(self.ts())
++            suffix_dir = os.path.dirname(df._datadir)
++            suffix = os.path.basename(suffix_dir)
++            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
++            self.assertIn(suffix, hashes)  # sanity
++
++            df2.delete(self.ts())
++            suffix_dir = os.path.dirname(df2._datadir)
++            suffix = os.path.basename(suffix_dir)
++            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
++            self.assertIn(suffix, hashes)  # sanity
++
+     def test_invalidate_hash_file_exists(self):
+         for policy in self.iter_policies():
+             df_mgr = self.df_router[policy]
