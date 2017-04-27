@@ -1,0 +1,98 @@
+From 17f6a6989d09d3d7522efcedf747d773d11d2535 Mon Sep 17 00:00:00 2001
+From: Tim Burke <tim.burke@gmail.com>
+Date: Thu, 17 Nov 2016 13:02:06 -0800
+Subject: [PATCH] Avoid infinite loop while placing parts
+
+Previously, we could over-assign how many parts should be in a tier.
+This would cause the local `parts` variable to go negative, which meant
+that our `while parts` loop would never terminate.
+
+Change-Id: Id7e7889742ca37cf1a9c0d55fba78d967e90e8d0
+Closes-Bug: 1642538
+(cherry picked from commit 2e7a7347fc58676fbaabce3d87a15866796d32e4)
+---
+ swift/common/ring/builder.py          |  6 +++---
+ test/unit/common/ring/test_builder.py | 34 ++++++++++++++++++++++++++++------
+ 2 files changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/swift/common/ring/builder.py b/swift/common/ring/builder.py
+index ee25ad7..2ce4c13 100644
+--- a/swift/common/ring/builder.py
++++ b/swift/common/ring/builder.py
+@@ -799,14 +799,14 @@ def place_parts(tier, parts):
+                 return
+             to_place = defaultdict(int)
+             for t in sub_tiers:
+-                to_place[t] = int(math.floor(
+-                    replica_plan[t]['target'] * self.parts))
++                to_place[t] = min(parts, int(math.floor(
++                    replica_plan[t]['target'] * self.parts)))
+                 parts -= to_place[t]
+ 
+             # if there's some parts left over, just throw 'em about
+             sub_tier_gen = itertools.cycle(sorted(
+                 sub_tiers, key=lambda t: replica_plan[t]['target']))
+-            while parts:
++            while parts > 0:
+                 t = next(sub_tier_gen)
+                 to_place[t] += 1
+                 parts -= 1
+diff --git a/test/unit/common/ring/test_builder.py b/test/unit/common/ring/test_builder.py
+index c8c5023..8414350 100644
+--- a/test/unit/common/ring/test_builder.py
++++ b/test/unit/common/ring/test_builder.py
+@@ -21,7 +21,7 @@
+ import unittest
+ import six.moves.cPickle as pickle
+ from array import array
+-from collections import defaultdict
++from collections import Counter, defaultdict
+ from math import ceil
+ from tempfile import mkdtemp
+ from shutil import rmtree
+@@ -49,11 +49,9 @@ def _partition_counts(self, builder, key='id'):
+         Returns a dictionary mapping the given device key to (number of
+         partitions assigned to to that key).
+         """
+-        counts = defaultdict(int)
+-        for part2dev_id in builder._replica2part2dev:
+-            for dev_id in part2dev_id:
+-                counts[builder.devs[dev_id][key]] += 1
+-        return counts
++        return Counter(builder.devs[dev_id][key]
++                       for part2dev_id in builder._replica2part2dev
++                       for dev_id in part2dev_id)
+ 
+     def _get_population_by_region(self, builder):
+         """
+@@ -281,6 +279,30 @@ def test_remove_dev(self):
+                 counts[dev_id] = counts.get(dev_id, 0) + 1
+         self.assertEqual(counts, {0: 256, 2: 256, 3: 256})
+ 
++    def test_round_off_error(self):
++        # 3 nodes with 11 disks each is particularly problematic. Probably has
++        # to do with the binary repr. of 1/33? Those ones look suspicious...
++        #
++        #   >>> bin(int(struct.pack('!f', 1.0/(33)).encode('hex'), 16))
++        #   '0b111100111110000011111000010000'
++        rb = ring.RingBuilder(8, 3, 1)
++        for id, (region, zone) in enumerate(11 * [(0, 0), (1, 10), (1, 11)]):
++            rb.add_dev({'id': id, 'region': region, 'zone': zone, 'weight': 1,
++                        'ip': '127.0.0.1', 'port': 10000 + region * 100 + zone,
++                        'device': 'sda%d' % id})
++        rb.rebalance()
++        self.assertEqual(self._partition_counts(rb, 'zone'),
++                         {0: 256, 10: 256, 11: 256})
++        wanted_by_zone = defaultdict(lambda: defaultdict(int))
++        for dev in rb._iter_devs():
++            wanted_by_zone[dev['zone']][dev['parts_wanted']] += 1
++        # We're nicely balanced, but parts_wanted is slightly lumpy
++        # because reasons.
++        self.assertEqual(wanted_by_zone, {
++            0: {0: 10, 1: 1},
++            10: {0: 11},
++            11: {0: 10, -1: 1}})
++
+     def test_remove_a_lot(self):
+         rb = ring.RingBuilder(3, 3, 1)
+         rb.add_dev({'id': 0, 'device': 'd0', 'ip': '10.0.0.1',

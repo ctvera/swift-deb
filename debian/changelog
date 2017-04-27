@@ -1,6 +1,9 @@
 swift (2.7.0-10~bpo8+1+szn4) Seznam; urgency=medium
 
   * Fix: Container drive error results double space usage on rest
+  * Added upstream stable patches:
+    - Avoid_infinite_loop_while_placing_parts.patch
+    - Fix_non-deterministic_suffix_updates_in_hashes_pkl.patch
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 27 Apr 2017 11:52:38 +0200
 
