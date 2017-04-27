@@ -1,3 +1,9 @@
+swift (2.7.0-10~bpo8+1+szn4) Seznam; urgency=medium
+
+  * Fix: Container drive error results double space usage on rest
+
+ -- Ondřej Nový <onovy@debian.org>  Thu, 27 Apr 2017 11:52:38 +0200
+
 swift (2.7.0-10~bpo8+1+szn3) Seznam; urgency=high
 
   * Fixed regression in consolidate_hashes
