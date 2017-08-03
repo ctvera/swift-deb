@@ -15,7 +15,7 @@
 
 """Tests for swift.common.utils"""
 from __future__ import print_function
-from test.unit import temptree, debug_logger
+from test.unit import temptree, debug_logger, make_timestamp_iter
 
 import ctypes
 import contextlib
@@ -25,11 +25,13 @@ import eventlet.event
 import functools
 import grp
 import logging
+import platform
 import os
 import mock
 import random
 import re
 import socket
+import string
 import sys
 import json
 import math
@@ -60,9 +62,11 @@ from swift.common.exceptions import Timeout, MessageTimeout, \
     ConnectionTimeout, LockTimeout, ReplicationLockTimeout, \
     MimeInvalid
 from swift.common import utils
-from swift.common.utils import is_valid_ip, is_valid_ipv4, is_valid_ipv6
+from swift.common.utils import is_valid_ip, is_valid_ipv4, is_valid_ipv6, \
+    set_swift_dir
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.header_key_dict import HeaderKeyDict
+from swift.common.storage_policy import POLICIES, reload_storage_policies
 from swift.common.swob import Request, Response
 from test.unit import FakeLogger, requires_o_tmpfile_support
 
@@ -177,7 +181,7 @@ class TestTimestamp(unittest.TestCase):
         self.assertRaises(ValueError, utils.Timestamp, time.time(), offset=-1)
 
     def test_invalid_string_conversion(self):
-        t = utils.Timestamp(time.time())
+        t = utils.Timestamp.now()
         self.assertRaises(TypeError, str, t)
 
     def test_offset_limit(self):
@@ -1315,7 +1319,7 @@ class TestUtils(unittest.TestCase):
             self.assertEqual(conf, conf_file)
             # assert defaults
             self.assertEqual(options['verbose'], False)
-            self.assertTrue('once' not in options)
+            self.assertNotIn('once', options)
             # assert verbose as option
             conf, options = utils.parse_options(test_args=[conf_file, '-v'])
             self.assertEqual(options['verbose'], True)
@@ -1360,21 +1364,53 @@ class TestUtils(unittest.TestCase):
         testcache_file = os.path.join(testdir_base, 'cache.recon')
         logger = utils.get_logger(None, 'server', log_route='server')
         try:
-            submit_dict = {'key1': {'value1': 1, 'value2': 2}}
+            submit_dict = {'key0': 99,
+                           'key1': {'value1': 1, 'value2': 2}}
             utils.dump_recon_cache(submit_dict, testcache_file, logger)
-            fd = open(testcache_file)
-            file_dict = json.loads(fd.readline())
-            fd.close()
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
             self.assertEqual(submit_dict, file_dict)
             # Use a nested entry
-            submit_dict = {'key1': {'key2': {'value1': 1, 'value2': 2}}}
-            result_dict = {'key1': {'key2': {'value1': 1, 'value2': 2},
-                           'value1': 1, 'value2': 2}}
+            submit_dict = {'key0': 101,
+                           'key1': {'key2': {'value1': 1, 'value2': 2}}}
+            expect_dict = {'key0': 101,
+                           'key1': {'key2': {'value1': 1, 'value2': 2},
+                                    'value1': 1, 'value2': 2}}
             utils.dump_recon_cache(submit_dict, testcache_file, logger)
-            fd = open(testcache_file)
-            file_dict = json.loads(fd.readline())
-            fd.close()
-            self.assertEqual(result_dict, file_dict)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
+            # cached entries are sticky
+            submit_dict = {}
+            utils.dump_recon_cache(submit_dict, testcache_file, logger)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
+            # nested dicts can be erased...
+            submit_dict = {'key1': {'key2': {}}}
+            expect_dict = {'key0': 101,
+                           'key1': {'value1': 1, 'value2': 2}}
+            utils.dump_recon_cache(submit_dict, testcache_file, logger)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
+            # ... and erasure is idempotent
+            utils.dump_recon_cache(submit_dict, testcache_file, logger)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
+            # top level dicts can be erased...
+            submit_dict = {'key1': {}}
+            expect_dict = {'key0': 101}
+            utils.dump_recon_cache(submit_dict, testcache_file, logger)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
+            # ... and erasure is idempotent
+            utils.dump_recon_cache(submit_dict, testcache_file, logger)
+            with open(testcache_file) as fd:
+                file_dict = json.loads(fd.readline())
+            self.assertEqual(expect_dict, file_dict)
         finally:
             rmtree(testdir_base)
 
@@ -1550,7 +1586,7 @@ class TestUtils(unittest.TestCase):
             for en in (errno.EIO, errno.ENOSPC):
                 log_exception(OSError(en, 'my %s error message' % en))
                 log_msg = strip_value(sio)
-                self.assertTrue('Traceback' not in log_msg)
+                self.assertNotIn('Traceback', log_msg)
                 self.assertTrue('my %s error message' % en in log_msg)
             # unfiltered
             log_exception(OSError())
@@ -1560,19 +1596,19 @@ class TestUtils(unittest.TestCase):
             log_exception(socket.error(errno.ECONNREFUSED,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('errno.ECONNREFUSED message test' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('errno.ECONNREFUSED message test', log_msg)
             self.assertTrue('Connection refused' in log_msg)
             log_exception(socket.error(errno.EHOSTUNREACH,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('my error message', log_msg)
             self.assertTrue('Host unreachable' in log_msg)
             log_exception(socket.error(errno.ETIMEDOUT, 'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('my error message', log_msg)
             self.assertTrue('Connection timeout' in log_msg)
             # unfiltered
             log_exception(socket.error(0, 'my error message'))
@@ -1584,16 +1620,16 @@ class TestUtils(unittest.TestCase):
             connection_timeout = ConnectionTimeout(42, 'my error message')
             log_exception(connection_timeout)
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
             self.assertTrue('ConnectionTimeout' in log_msg)
             self.assertTrue('(42s)' in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('my error message', log_msg)
             connection_timeout.cancel()
 
             message_timeout = MessageTimeout(42, 'my error message')
             log_exception(message_timeout)
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
             self.assertTrue('MessageTimeout' in log_msg)
             self.assertTrue('(42s)' in log_msg)
             self.assertTrue('my error message' in log_msg)
@@ -1684,7 +1720,7 @@ class TestUtils(unittest.TestCase):
             logger.error('my error message')
             log_msg = strip_value(sio)
             self.assertTrue('my error message' in log_msg)
-            self.assertTrue('txn' not in log_msg)
+            self.assertNotIn('txn', log_msg)
             logger.txn_id = '12345'
             logger.error('test')
             log_msg = strip_value(sio)
@@ -1710,7 +1746,7 @@ class TestUtils(unittest.TestCase):
             logger.error('my error message')
             log_msg = strip_value(sio)
             self.assertTrue('my error message' in log_msg)
-            self.assertTrue('client_ip' not in log_msg)
+            self.assertNotIn('client_ip', log_msg)
             logger.client_ip = '1.2.3.4'
             logger.error('test')
             log_msg = strip_value(sio)
@@ -1720,8 +1756,8 @@ class TestUtils(unittest.TestCase):
             self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.info('test')
             log_msg = strip_value(sio)
-            self.assertTrue('client_ip' not in log_msg)
-            self.assertTrue('1.2.3.4' not in log_msg)
+            self.assertNotIn('client_ip', log_msg)
+            self.assertNotIn('1.2.3.4', log_msg)
             # test client_ip (and txn) already in message
             self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.warning('test 1.2.3.4 test 12345')
@@ -1984,9 +2020,12 @@ log_name = yarr'''
             expected = {'__file__': conffile, 'log_name': 'section1',
                         'foo': 'bar', 'bar': 'baz'}
             self.assertEqual(result, expected)
-        self.assertRaises(SystemExit, utils.readconf, temppath, 'section3')
+
+        self.assertRaisesRegexp(
+            ValueError, 'Unable to find section3 config section in.*',
+            utils.readconf, temppath, 'section3')
         os.unlink(temppath)
-        self.assertRaises(SystemExit, utils.readconf, temppath)
+        self.assertRaises(IOError, utils.readconf, temppath)
 
     def test_readconf_raw(self):
         conf = '''[section1]
@@ -2010,7 +2049,7 @@ log_name = %(yarr)s'''
                         'section2': {'log_name': '%(yarr)s'}}
             self.assertEqual(result, expected)
         os.unlink(temppath)
-        self.assertRaises(SystemExit, utils.readconf, temppath)
+        self.assertRaises(IOError, utils.readconf, temppath)
 
     def test_readconf_dir(self):
         config_dir = {
@@ -2129,7 +2168,7 @@ log_name = %(yarr)s'''
         for func in required_func_calls:
             self.assertTrue(utils.os.called_funcs[func])
         for func in bad_func_calls:
-            self.assertTrue(func not in utils.os.called_funcs)
+            self.assertNotIn(func, utils.os.called_funcs)
 
     @reset_logger_state
     def test_capture_stdio(self):
@@ -2424,11 +2463,11 @@ log_name = %(yarr)s'''
             file_name = os.path.join(t, 'blah.pid')
             # assert no raise
             self.assertEqual(os.path.exists(file_name), False)
-            self.assertEqual(utils.remove_file(file_name), None)
+            self.assertIsNone(utils.remove_file(file_name))
             with open(file_name, 'w') as f:
                 f.write('1')
             self.assertTrue(os.path.exists(file_name))
-            self.assertEqual(utils.remove_file(file_name), None)
+            self.assertIsNone(utils.remove_file(file_name))
             self.assertFalse(os.path.exists(file_name))
 
     def test_human_readable(self):
@@ -2573,6 +2612,35 @@ cluster_dfw1 = http://dfw1.host/v1/
             self.assertTrue(utils.config_true_value(False) is False)
         finally:
             utils.TRUE_VALUES = orig_trues
+
+    def test_config_positive_int_value(self):
+        expectations = {
+            # value : expected,
+            '1': 1,
+            1: 1,
+            '2': 2,
+            '1024': 1024,
+            '0': ValueError,
+            '-1': ValueError,
+            '0x01': ValueError,
+            'asdf': ValueError,
+            None: ValueError,
+            0: ValueError,
+            -1: ValueError,
+            '1.2': ValueError,  # string expresses float should be value error
+        }
+        for value, expected in expectations.items():
+            try:
+                rv = utils.config_positive_int_value(value)
+            except Exception as e:
+                if e.__class__ is not expected:
+                    raise
+                else:
+                    self.assertEqual(
+                        'Config option must be an positive int number, '
+                        'not "%s".' % value, e.message)
+            else:
+                self.assertEqual(expected, rv)
 
     def test_config_auto_int_value(self):
         expectations = {
@@ -2944,7 +3012,7 @@ cluster_dfw1 = http://dfw1.host/v1/
 
     def test_get_trans_id_time(self):
         ts = utils.get_trans_id_time('tx8c8bc884cdaf499bb29429aa9c46946e')
-        self.assertEqual(ts, None)
+        self.assertIsNone(ts)
         ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-0051720c06')
         self.assertEqual(ts, 1366428678)
         self.assertEqual(
@@ -2957,11 +3025,11 @@ cluster_dfw1 = http://dfw1.host/v1/
             time.asctime(time.gmtime(ts)) + ' UTC',
             'Sat Apr 20 03:31:18 2013 UTC')
         ts = utils.get_trans_id_time('')
-        self.assertEqual(ts, None)
+        self.assertIsNone(ts)
         ts = utils.get_trans_id_time('garbage')
-        self.assertEqual(ts, None)
+        self.assertIsNone(ts)
         ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-almostright')
-        self.assertEqual(ts, None)
+        self.assertIsNone(ts)
 
     def test_config_fallocate_value(self):
         fallocate_value, is_percent = utils.config_fallocate_value('10%')
@@ -3267,6 +3335,16 @@ cluster_dfw1 = http://dfw1.host/v1/
         finally:
             shutil.rmtree(tmpdir)
 
+    def test_ismount_successes_stubfile(self):
+        tmpdir = mkdtemp()
+        fname = os.path.join(tmpdir, ".ismount")
+        try:
+            with open(fname, "w") as stubfile:
+                stubfile.write("")
+            self.assertTrue(utils.ismount(tmpdir))
+        finally:
+            shutil.rmtree(tmpdir)
+
     def test_parse_content_type(self):
         self.assertEqual(utils.parse_content_type('text/plain'),
                          ('text/plain', []))
@@ -3340,6 +3418,27 @@ cluster_dfw1 = http://dfw1.host/v1/
                 'text/plain; swift_bytes=123; someother=thing'}
         for before, after in subtests.items():
             self.assertEqual(utils.clean_content_type(before), after)
+
+    def test_get_valid_utf8_str(self):
+        def do_test(input_value, expected):
+            actual = utils.get_valid_utf8_str(input_value)
+            self.assertEqual(expected, actual)
+            self.assertIsInstance(actual, six.binary_type)
+            actual.decode('utf-8')
+
+        do_test(b'abc', b'abc')
+        do_test(u'abc', b'abc')
+        do_test(u'\uc77c\uc601', b'\xec\x9d\xbc\xec\x98\x81')
+        do_test(b'\xec\x9d\xbc\xec\x98\x81', b'\xec\x9d\xbc\xec\x98\x81')
+
+        # test some invalid UTF-8
+        do_test(b'\xec\x9d\xbc\xec\x98', b'\xec\x9d\xbc\xef\xbf\xbd')
+
+        # check surrogate pairs, too
+        do_test(u'\U0001f0a1', b'\xf0\x9f\x82\xa1'),
+        do_test(u'\uD83C\uDCA1', b'\xf0\x9f\x82\xa1'),
+        do_test(b'\xf0\x9f\x82\xa1', b'\xf0\x9f\x82\xa1'),
+        do_test(b'\xed\xa0\xbc\xed\xb2\xa1', b'\xf0\x9f\x82\xa1'),
 
     def test_quote(self):
         res = utils.quote('/v1/a/c3/subdirx/')
@@ -3579,7 +3678,14 @@ cluster_dfw1 = http://dfw1.host/v1/
             called = {}
             # just ionice class uses default priority 0
             utils.modify_priority({'ionice_class': 'IOPRIO_CLASS_RT'}, logger)
-            self.assertEqual(called, {'syscall': (251, 1, pid, 1 << 13)})
+            architecture = os.uname()[4]
+            arch_bits = platform.architecture()[0]
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {'syscall': (251, 1, pid, 1 << 13)})
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {'syscall': (30, 1, pid, 1 << 13)})
+            else:
+                self.fail("Unexpected call: %r" % called)
             called = {}
             # just ionice priority is ignored
             utils.modify_priority({'ionice_priority': '4'}, logger)
@@ -3594,7 +3700,16 @@ cluster_dfw1 = http://dfw1.host/v1/
                 'ionice_class': 'IOPRIO_CLASS_BE',
                 'ionice_priority': '4',
             }, logger)
-            self.assertEqual(called, {'syscall': (251, 1, pid, 2 << 13 | 4)})
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'syscall': (251, 1, pid, 2 << 13 | 4)
+                })
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'syscall': (30, 1, pid, 2 << 13 | 4)
+                })
+            else:
+                self.fail("Unexpected call: %r" % called)
             called = {}
             # all
             utils.modify_priority({
@@ -3602,10 +3717,18 @@ cluster_dfw1 = http://dfw1.host/v1/
                 'ionice_class': 'IOPRIO_CLASS_IDLE',
                 'ionice_priority': '6',
             }, logger)
-            self.assertEqual(called, {
-                'setpriority': (0, pid, -15),
-                'syscall': (251, 1, pid, 3 << 13 | 6),
-            })
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'setpriority': (0, pid, -15),
+                    'syscall': (251, 1, pid, 3 << 13 | 6),
+                })
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'setpriority': (0, pid, -15),
+                    'syscall': (30, 1, pid, 3 << 13 | 6),
+                })
+            else:
+                self.fail("Unexpected call: %r" % called)
 
     def test__NR_ioprio_set(self):
         with patch('os.uname', return_value=('', '', '', '', 'x86_64')), \
@@ -3613,6 +3736,14 @@ cluster_dfw1 = http://dfw1.host/v1/
             self.assertEqual(251, utils.NR_ioprio_set())
 
         with patch('os.uname', return_value=('', '', '', '', 'x86_64')), \
+                patch('platform.architecture', return_value=('32bit', '')):
+            self.assertRaises(OSError, utils.NR_ioprio_set)
+
+        with patch('os.uname', return_value=('', '', '', '', 'aarch64')), \
+                patch('platform.architecture', return_value=('64bit', '')):
+            self.assertEqual(30, utils.NR_ioprio_set())
+
+        with patch('os.uname', return_value=('', '', '', '', 'aarch64')), \
                 patch('platform.architecture', return_value=('32bit', '')):
             self.assertRaises(OSError, utils.NR_ioprio_set)
 
@@ -3722,6 +3853,28 @@ cluster_dfw1 = http://dfw1.host/v1/
         if failures:
             self.fail('Invalid results from pure function:\n%s' %
                       '\n'.join(failures))
+
+    def test_replace_partition_in_path(self):
+        # Check for new part = part * 2
+        old = '/s/n/d/o/700/c77/af088baea4806dcaba30bf07d9e64c77/f'
+        new = '/s/n/d/o/1400/c77/af088baea4806dcaba30bf07d9e64c77/f'
+        # Expected outcome
+        self.assertEqual(utils.replace_partition_in_path(old, 11), new)
+
+        # Make sure there is no change if the part power didn't change
+        self.assertEqual(utils.replace_partition_in_path(old, 10), old)
+        self.assertEqual(utils.replace_partition_in_path(new, 11), new)
+
+        # Check for new part = part * 2 + 1
+        old = '/s/n/d/o/693/c77/ad708baea4806dcaba30bf07d9e64c77/f'
+        new = '/s/n/d/o/1387/c77/ad708baea4806dcaba30bf07d9e64c77/f'
+
+        # Expected outcome
+        self.assertEqual(utils.replace_partition_in_path(old, 11), new)
+
+        # Make sure there is no change if the part power didn't change
+        self.assertEqual(utils.replace_partition_in_path(old, 10), old)
+        self.assertEqual(utils.replace_partition_in_path(new, 11), new)
 
 
 class ResellerConfReader(unittest.TestCase):
@@ -3909,12 +4062,13 @@ class TestUnlinkOlder(unittest.TestCase):
     def setUp(self):
         self.tempdir = mkdtemp()
         self.mtime = {}
+        self.ts = make_timestamp_iter()
 
     def tearDown(self):
         rmtree(self.tempdir, ignore_errors=True)
 
     def touch(self, fpath, mtime=None):
-        self.mtime[fpath] = mtime or time.time()
+        self.mtime[fpath] = mtime or next(self.ts)
         open(fpath, 'w')
 
     @contextlib.contextmanager
@@ -3933,23 +4087,23 @@ class TestUnlinkOlder(unittest.TestCase):
     def test_unlink_older_than_path_not_exists(self):
         path = os.path.join(self.tempdir, 'does-not-exist')
         # just make sure it doesn't blow up
-        utils.unlink_older_than(path, time.time())
+        utils.unlink_older_than(path, next(self.ts))
 
     def test_unlink_older_than_file(self):
         path = os.path.join(self.tempdir, 'some-file')
         self.touch(path)
         with self.assertRaises(OSError) as ctx:
-            utils.unlink_older_than(path, time.time())
+            utils.unlink_older_than(path, next(self.ts))
         self.assertEqual(ctx.exception.errno, errno.ENOTDIR)
 
     def test_unlink_older_than_now(self):
         self.touch(os.path.join(self.tempdir, 'test'))
         with self.high_resolution_getmtime():
-            utils.unlink_older_than(self.tempdir, time.time())
+            utils.unlink_older_than(self.tempdir, next(self.ts))
         self.assertEqual([], os.listdir(self.tempdir))
 
     def test_unlink_not_old_enough(self):
-        start = time.time()
+        start = next(self.ts)
         self.touch(os.path.join(self.tempdir, 'test'))
         with self.high_resolution_getmtime():
             utils.unlink_older_than(self.tempdir, start)
@@ -3957,7 +4111,7 @@ class TestUnlinkOlder(unittest.TestCase):
 
     def test_unlink_mixed(self):
         self.touch(os.path.join(self.tempdir, 'first'))
-        cutoff = time.time()
+        cutoff = next(self.ts)
         self.touch(os.path.join(self.tempdir, 'second'))
         with self.high_resolution_getmtime():
             utils.unlink_older_than(self.tempdir, cutoff)
@@ -3971,17 +4125,17 @@ class TestUnlinkOlder(unittest.TestCase):
             paths.append(path)
         # don't unlink everyone
         with self.high_resolution_getmtime():
-            utils.unlink_paths_older_than(paths[:2], time.time())
+            utils.unlink_paths_older_than(paths[:2], next(self.ts))
         self.assertEqual(['third'], os.listdir(self.tempdir))
 
     def test_unlink_empty_paths(self):
         # just make sure it doesn't blow up
-        utils.unlink_paths_older_than([], time.time())
+        utils.unlink_paths_older_than([], next(self.ts))
 
     def test_unlink_not_exists_paths(self):
         path = os.path.join(self.tempdir, 'does-not-exist')
         # just make sure it doesn't blow up
-        utils.unlink_paths_older_than([path], time.time())
+        utils.unlink_paths_older_than([path], next(self.ts))
 
 
 class TestSwiftInfo(unittest.TestCase):
@@ -4029,7 +4183,7 @@ class TestSwiftInfo(unittest.TestCase):
 
         info = utils.get_swift_info()
 
-        self.assertTrue('admin' not in info)
+        self.assertNotIn('admin', info)
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
@@ -4048,19 +4202,19 @@ class TestSwiftInfo(unittest.TestCase):
 
         info = utils.get_swift_info(disallowed_sections=['cap1', 'cap3'])
 
-        self.assertTrue('admin' not in info)
+        self.assertNotIn('admin', info)
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
         self.assertEqual(info['swift']['foo'], 'bar')
 
-        self.assertTrue('cap1' not in info)
+        self.assertNotIn('cap1', info)
 
         self.assertTrue('cap2' in info)
         self.assertTrue('cap2_foo' in info['cap2'])
         self.assertEqual(info['cap2']['cap2_foo'], 'cap2_bar')
 
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
 
     def test_register_swift_admin_info(self):
         utils.register_swift_info(admin=True, admin_foo='admin_bar')
@@ -4084,8 +4238,8 @@ class TestSwiftInfo(unittest.TestCase):
         self.assertEqual(
             utils._swift_admin_info['cap1']['ac1_lorem'], 'ac1_ipsum')
 
-        self.assertTrue('swift' not in utils._swift_info)
-        self.assertTrue('cap1' not in utils._swift_info)
+        self.assertNotIn('swift', utils._swift_info)
+        self.assertNotIn('cap1', utils._swift_info)
 
     def test_get_swift_admin_info(self):
         utils._swift_info = {'swift': {'foo': 'bar'},
@@ -4123,20 +4277,20 @@ class TestSwiftInfo(unittest.TestCase):
         self.assertEqual(info['admin']['admin_cap1']['ac1_foo'], 'ac1_bar')
         self.assertTrue('disallowed_sections' in info['admin'])
         self.assertTrue('cap1' in info['admin']['disallowed_sections'])
-        self.assertTrue('cap2' not in info['admin']['disallowed_sections'])
+        self.assertNotIn('cap2', info['admin']['disallowed_sections'])
         self.assertTrue('cap3' in info['admin']['disallowed_sections'])
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
         self.assertEqual(info['swift']['foo'], 'bar')
 
-        self.assertTrue('cap1' not in info)
+        self.assertNotIn('cap1', info)
 
         self.assertTrue('cap2' in info)
         self.assertTrue('cap2_foo' in info['cap2'])
         self.assertEqual(info['cap2']['cap2_foo'], 'cap2_bar')
 
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
 
     def test_get_swift_admin_info_with_disallowed_sub_sections(self):
         utils._swift_info = {'swift': {'foo': 'bar'},
@@ -4151,10 +4305,10 @@ class TestSwiftInfo(unittest.TestCase):
         info = utils.get_swift_info(
             admin=True, disallowed_sections=['cap1.cap1_foo', 'cap3',
                                              'cap4.a.b.c'])
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
         self.assertEqual(info['cap1']['cap1_moo'], 'cap1_baa')
-        self.assertTrue('cap1_foo' not in info['cap1'])
-        self.assertTrue('c' not in info['cap4']['a']['b'])
+        self.assertNotIn('cap1_foo', info['cap1'])
+        self.assertNotIn('c', info['cap4']['a']['b'])
         self.assertEqual(info['cap4']['a']['b.c'], 'b.c')
 
     def test_get_swift_info_with_unmatched_disallowed_sections(self):
@@ -5049,17 +5203,6 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
                         self.logger.update_stats, 'another.counter', 3,
                         sample_rate=0.9912)
 
-    def test_get_valid_utf8_str(self):
-        unicode_sample = u'\uc77c\uc601'
-        valid_utf8_str = unicode_sample.encode('utf-8')
-        invalid_utf8_str = unicode_sample.encode('utf-8')[::-1]
-        self.assertEqual(valid_utf8_str,
-                         utils.get_valid_utf8_str(valid_utf8_str))
-        self.assertEqual(valid_utf8_str,
-                         utils.get_valid_utf8_str(unicode_sample))
-        self.assertEqual(b'\xef\xbf\xbd\xef\xbf\xbd\xec\xbc\x9d\xef\xbf\xbd',
-                         utils.get_valid_utf8_str(invalid_utf8_str))
-
     @reset_logger_state
     def test_thread_locals(self):
         logger = utils.get_logger(None)
@@ -5362,7 +5505,7 @@ class TestGreenAsyncPile(unittest.TestCase):
             pass
         pile = utils.GreenAsyncPile(3)
         pile.spawn(run_test)
-        self.assertEqual(next(pile), None)
+        self.assertIsNone(next(pile))
         self.assertRaises(StopIteration, lambda: next(pile))
 
     def test_waitall_timeout_timesout(self):
@@ -5532,6 +5675,98 @@ class TestLRUCache(unittest.TestCase):
         for i in range(12):
             f(i)
         self.assertEqual(f.size(), 4)
+
+
+class TestSpliterator(unittest.TestCase):
+    def test_string(self):
+        input_chunks = ["coun", "ter-", "b", "ra", "nch-mater",
+                        "nit", "y-fungusy", "-nummular"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(8)), "counter-")
+        self.assertEqual(''.join(si.take(7)), "branch-")
+        self.assertEqual(''.join(si.take(10)), "maternity-")
+        self.assertEqual(''.join(si.take(8)), "fungusy-")
+        self.assertEqual(''.join(si.take(8)), "nummular")
+
+    def test_big_input_string(self):
+        input_chunks = ["iridium"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(2)), "ir")
+        self.assertEqual(''.join(si.take(1)), "i")
+        self.assertEqual(''.join(si.take(2)), "di")
+        self.assertEqual(''.join(si.take(1)), "u")
+        self.assertEqual(''.join(si.take(1)), "m")
+
+    def test_chunk_boundaries(self):
+        input_chunks = ["soylent", "green", "is", "people"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(7)), "soylent")
+        self.assertEqual(''.join(si.take(5)), "green")
+        self.assertEqual(''.join(si.take(2)), "is")
+        self.assertEqual(''.join(si.take(6)), "people")
+
+    def test_no_empty_strings(self):
+        input_chunks = ["soylent", "green", "is", "people"]
+        si = utils.Spliterator(input_chunks)
+
+        outputs = (list(si.take(7))     # starts and ends on chunk boundary
+                   + list(si.take(2))   # spans two chunks
+                   + list(si.take(3))   # begins but does not end chunk
+                   + list(si.take(2))   # ends but does not begin chunk
+                   + list(si.take(6)))  # whole chunk + EOF
+        self.assertNotIn('', outputs)
+
+    def test_running_out(self):
+        input_chunks = ["not much"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(4)), "not ")
+        self.assertEqual(''.join(si.take(99)), "much")  # short
+        self.assertEqual(''.join(si.take(4)), "")
+        self.assertEqual(''.join(si.take(4)), "")
+
+    def test_overlap(self):
+        input_chunks = ["one fish", "two fish", "red fish", "blue fish"]
+
+        si = utils.Spliterator(input_chunks)
+        t1 = si.take(20)  # longer than first chunk
+        self.assertLess(len(next(t1)), 20)  # it's not exhausted
+
+        t2 = si.take(20)
+        self.assertRaises(ValueError, next, t2)
+
+    def test_closing(self):
+        input_chunks = ["abcd", "efg", "hij"]
+
+        si = utils.Spliterator(input_chunks)
+        it = si.take(3)  # shorter than first chunk
+        self.assertEqual(next(it), 'abc')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['d', 'efg', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        self.assertEqual(list(si.take(1)), ['a'])
+        it = si.take(1)  # still shorter than first chunk
+        self.assertEqual(next(it), 'b')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['cd', 'efg', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        it = si.take(6)  # longer than first chunk, shorter than first + second
+        self.assertEqual(next(it), 'abcd')
+        self.assertEqual(next(it), 'ef')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['g', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        self.assertEqual(list(si.take(2)), ['ab'])
+        it = si.take(3)  # longer than rest of chunk
+        self.assertEqual(next(it), 'cd')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['efg', 'hij'])
 
 
 class TestParseContentRange(unittest.TestCase):
@@ -5893,6 +6128,129 @@ class TestSocketStringParser(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     utils.parse_socket_string(addr, default)
 
+
+class TestHashForFileFunction(unittest.TestCase):
+    def setUp(self):
+        self.tempfilename = tempfile.mktemp()
+
+    def tearDown(self):
+        try:
+            os.unlink(self.tempfilename)
+        except OSError:
+            pass
+
+    def test_hash_for_file_smallish(self):
+        stub_data = 'some data'
+        with open(self.tempfilename, 'wb') as fd:
+            fd.write(stub_data)
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual([mock.call(stub_data)],
+                         mock_hasher.update.call_args_list)
+
+    def test_hash_for_file_big(self):
+        num_blocks = 10
+        block_size = utils.MD5_BLOCK_READ_BYTES
+        truncate = 523
+        start_char = ord('a')
+        expected_blocks = [chr(i) * block_size
+                           for i in range(start_char, start_char + num_blocks)]
+        full_data = ''.join(expected_blocks)
+        trimmed_data = full_data[:-truncate]
+        # sanity
+        self.assertEqual(len(trimmed_data), block_size * num_blocks - truncate)
+        with open(self.tempfilename, 'wb') as fd:
+            fd.write(trimmed_data)
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual(num_blocks, len(mock_hasher.update.call_args_list))
+        found_blocks = []
+        for i, (expected_block, call) in enumerate(zip(
+                expected_blocks, mock_hasher.update.call_args_list)):
+            args, kwargs = call
+            self.assertEqual(kwargs, {})
+            self.assertEqual(1, len(args))
+            block = args[0]
+            if i < num_blocks - 1:
+                self.assertEqual(block, expected_block)
+            else:
+                self.assertEqual(block, expected_block[:-truncate])
+            found_blocks.append(block)
+        self.assertEqual(''.join(found_blocks), trimmed_data)
+
+    def test_hash_for_file_empty(self):
+        with open(self.tempfilename, 'wb'):
+            pass
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual([], mock_hasher.update.call_args_list)
+
+    def test_hash_for_file_brittle(self):
+        data_to_expected_hash = {
+            '': 'd41d8cd98f00b204e9800998ecf8427e',
+            'some data': '1e50210a0202497fb79bc38b6ade6c34',
+            ('a' * 4096 * 10)[:-523]: '06a41551609656c85f14f659055dc6d3',
+        }
+        # unlike some other places where the concrete implementation really
+        # matters for backwards compatibility these brittle tests are probably
+        # not needed or justified, if a future maintainer rips them out later
+        # they're probably doing the right thing
+        failures = []
+        for stub_data, expected_hash in data_to_expected_hash.items():
+            with open(self.tempfilename, 'wb') as fd:
+                fd.write(stub_data)
+            rv = utils.md5_hash_for_file(self.tempfilename)
+            try:
+                self.assertEqual(expected_hash, rv)
+            except AssertionError:
+                trim_cap = 80
+                if len(stub_data) > trim_cap:
+                    stub_data = '%s...<truncated>' % stub_data[:trim_cap]
+                failures.append('hash for %r was %s instead of expected %s' % (
+                    stub_data, rv, expected_hash))
+        if failures:
+            self.fail('Some data did not compute expected hash:\n' +
+                      '\n'.join(failures))
+
+
+class TestSetSwiftDir(unittest.TestCase):
+    def setUp(self):
+        self.swift_dir = tempfile.mkdtemp()
+        self.swift_conf = os.path.join(self.swift_dir, 'swift.conf')
+        self.policy_name = ''.join(random.sample(string.letters, 20))
+        with open(self.swift_conf, "wb") as sc:
+            sc.write('''
+[swift-hash]
+swift_hash_path_suffix = changeme
+
+[storage-policy:0]
+name = default
+default = yes
+
+[storage-policy:1]
+name = %s
+''' % self.policy_name)
+
+    def tearDown(self):
+        shutil.rmtree(self.swift_dir, ignore_errors=True)
+
+    def test_set_swift_dir(self):
+        set_swift_dir(None)
+        reload_storage_policies()
+        self.assertIsNone(POLICIES.get_by_name(self.policy_name))
+
+        set_swift_dir(self.swift_dir)
+        reload_storage_policies()
+        self.assertIsNotNone(POLICIES.get_by_name(self.policy_name))
 
 if __name__ == '__main__':
     unittest.main()

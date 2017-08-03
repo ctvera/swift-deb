@@ -35,11 +35,11 @@ from swift.common.constraints import FORMAT2CONTENT_TYPE
 from swift.common.exceptions import ListingIterError, SegmentError
 from swift.common.http import is_success
 from swift.common.swob import HTTPBadRequest, HTTPNotAcceptable, \
-    HTTPServiceUnavailable, Range, is_chunked
+    HTTPServiceUnavailable, Range, is_chunked, multi_range_iterator
 from swift.common.utils import split_path, validate_device_partition, \
     close_if_possible, maybe_multipart_byteranges_to_document_iters, \
     multipart_byteranges_to_document_iters, parse_content_type, \
-    parse_content_range, csv_append, list_from_csv
+    parse_content_range, csv_append, list_from_csv, Spliterator
 
 from swift.common.wsgi import make_subrequest
 
@@ -57,7 +57,7 @@ def get_param(req, name, default=None):
     :param default: result to return if the parameter is not found
     :returns: HTTP request parameter value
               (as UTF-8 encoded str, not unicode object)
-    :raises: HTTPBadRequest if param not valid UTF-8 byte sequence
+    :raises HTTPBadRequest: if param not valid UTF-8 byte sequence
     """
     value = req.params.get(name, default)
     if value and not isinstance(value, six.text_type):
@@ -77,8 +77,8 @@ def get_listing_content_type(req):
 
     :param req: request object
     :returns: content type as a string (e.g. text/plain, application/json)
-    :raises: HTTPNotAcceptable if the requested content type is not acceptable
-    :raises: HTTPBadRequest if the 'format' query param is provided and
+    :raises HTTPNotAcceptable: if the requested content type is not acceptable
+    :raises HTTPBadRequest: if the 'format' query param is provided and
              not valid UTF-8
     """
     query_format = get_param(req, 'format')
@@ -103,7 +103,7 @@ def get_name_and_placement(request, minsegs=1, maxsegs=None,
 
     :returns: a list, result of :meth:`split_and_validate_path` with
               the BaseStoragePolicy instance appended on the end
-    :raises: HTTPServiceUnavailable if the path is invalid or no policy exists
+    :raises HTTPServiceUnavailable: if the path is invalid or no policy exists
              with the extracted policy_index.
     """
     policy_index = request.headers.get('X-Backend-Storage-Policy-Index')
@@ -126,7 +126,7 @@ def split_and_validate_path(request, minsegs=1, maxsegs=None,
 
     :returns: result of :meth:`~swift.common.utils.split_path` if
               everything's okay
-    :raises: HTTPBadRequest if something's not okay
+    :raises HTTPBadRequest: if something's not okay
     """
     try:
         segs = split_path(unquote(request.path),
@@ -519,6 +519,25 @@ class SegmentedIterable(object):
         handle the range stuff internally, so we just no-op this out for swob.
         """
         return self
+
+    def app_iter_ranges(self, ranges, content_type, boundary, content_size):
+        """
+        This method assumes that iter(self) yields all the data bytes that
+        go into the response, but none of the MIME stuff. For example, if
+        the response will contain three MIME docs with data "abcd", "efgh",
+        and "ijkl", then iter(self) will give out the bytes "abcdefghijkl".
+
+        This method inserts the MIME stuff around the data bytes.
+        """
+        si = Spliterator(self)
+        mri = multi_range_iterator(
+            ranges, content_type, boundary, content_size,
+            lambda start, end_plus_one: si.take(end_plus_one - start))
+        try:
+            for x in mri:
+                yield x
+        finally:
+            self.close()
 
     def validate_first_segment(self):
         """

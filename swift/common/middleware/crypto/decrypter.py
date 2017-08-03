@@ -233,7 +233,7 @@ class DecrypterObjContext(BaseDecrypterContext):
 
         :param resp: application response
         :param boundary: multipart boundary string
-        :param keys: a dict of decryption keys.
+        :param body_key: decryption key for the response body
         :param crypto_meta: crypto_meta for the response body
         :return: generator for decrypted response body
         """
@@ -262,7 +262,7 @@ class DecrypterObjContext(BaseDecrypterContext):
         Decrypts a response body.
 
         :param resp: application response
-        :param keys: a dict of decryption keys.
+        :param body_key: decryption key for the response body
         :param crypto_meta: crypto_meta for the response body
         :param offset: offset into object content at which response body starts
         :return: generator for decrypted response body
@@ -378,12 +378,6 @@ class DecrypterContContext(BaseDecrypterContext):
                        self._response_exc_info)
 
         return app_resp
-
-    def update_content_length(self, new_total_len):
-        self._response_headers = [
-            (h, v) for h, v in self._response_headers
-            if h.lower() != 'content-length']
-        self._response_headers.append(('Content-Length', str(new_total_len)))
 
     def process_json_resp(self, key, resp_iter):
         """

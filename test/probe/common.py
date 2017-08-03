@@ -33,8 +33,7 @@ from swiftclient import get_auth, head_account
 from swift.common import internal_client
 from swift.obj.diskfile import get_data_dir
 from swift.common.ring import Ring
-from swift.common.utils import readconf, renamer, \
-    config_true_value, rsync_module_interpolation
+from swift.common.utils import readconf, renamer, rsync_module_interpolation
 from swift.common.manager import Manager
 from swift.common.storage_policy import POLICIES, EC_POLICY, REPL_POLICY
 
@@ -60,7 +59,7 @@ def get_server_number(ipport, ipport2server):
 
 def start_server(ipport, ipport2server):
     server, number = get_server_number(ipport, ipport2server)
-    err = Manager([server]).start(number=number, wait=False)
+    err = Manager([server]).start(number=number, wait=True)
     if err:
         raise Exception('unable to start %s' % (
             server if not number else '%s%s' % (server, number)))
@@ -234,8 +233,6 @@ def get_ring(ring_name, required_replicas, required_devices,
         rsync_export = conf.get('rsync_module', '').rstrip('/')
         if not rsync_export:
             rsync_export = '{replication_ip}::%s' % server
-            if config_true_value(conf.get('vm_test_mode', 'no')):
-                rsync_export += '{replication_port}'
         cmd = "rsync %s" % rsync_module_interpolation(rsync_export, dev)
         p = Popen(cmd, shell=True, stdout=PIPE)
         stdout, _stderr = p.communicate()
@@ -361,7 +358,7 @@ class ProbeTest(unittest.TestCase):
                     'servers_per_port', '0'))
                 for c in self.configs['object-replicator'].values())
 
-            Manager(['main']).start(wait=False)
+            Manager(['main']).start(wait=True)
             for ipport in self.ipport2server:
                 check_server(ipport, self.ipport2server)
             proxy_ipport = ('127.0.0.1', 8080)

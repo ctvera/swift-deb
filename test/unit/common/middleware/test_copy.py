@@ -27,6 +27,7 @@ from swift.common import swob
 from swift.common.middleware import copy
 from swift.common.storage_policy import POLICIES
 from swift.common.swob import Request, HTTPException
+from swift.common.utils import closing_if_possible
 from test.unit import patch_policies, debug_logger, FakeMemcache, FakeRing
 from test.unit.common.middleware.helpers import FakeSwift
 from test.unit.proxy.controllers.test_obj import set_http_connect, \
@@ -97,6 +98,9 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         })(self.app)
         self.ssc.logger = self.app.logger
 
+    def tearDown(self):
+        self.assertEqual(self.app.unclosed_requests, {})
+
     def call_app(self, req, app=None, expect_exception=False):
         if app is None:
             app = self.app
@@ -122,8 +126,10 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         body = ''
         caught_exc = None
         try:
-            for chunk in body_iter:
-                body += chunk
+            # appease the close-checker
+            with closing_if_possible(body_iter):
+                for chunk in body_iter:
+                    body += chunk
         except Exception as exc:
             if expect_exception:
                 caught_exc = exc
@@ -260,6 +266,8 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual('/v1/a/c/o', self.authorized[0].path)
         self.assertEqual('PUT', self.authorized[1].method)
         self.assertEqual('/v1/a/c/o2', self.authorized[1].path)
+        self.assertEqual(self.app.swift_sources[0], 'SSC')
+        self.assertEqual(self.app.swift_sources[1], 'SSC')
         # For basic test cases, assert orig_req_method behavior
         self.assertNotIn('swift.orig_req_method', req.environ)
 
@@ -1464,6 +1472,10 @@ class TestServerSideCopyConfiguration(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
+    def test_post_as_copy_defaults_to_false(self):
+        ssc = copy.filter_factory({})("no app here")
+        self.assertEqual(ssc.object_post_as_copy, False)
+
     def test_reading_proxy_conf_when_no_middleware_conf_present(self):
         proxy_conf = dedent("""
         [DEFAULT]
@@ -1511,12 +1523,49 @@ class TestServerSideCopyConfiguration(unittest.TestCase):
         conffile.write(proxy_conf)
         conffile.flush()
 
-        ssc = copy.filter_factory({
-            'object_post_as_copy': 'no',
-            '__file__': conffile.name
-        })("no app here")
+        with mock.patch('swift.common.middleware.copy.get_logger',
+                        return_value=debug_logger('copy')):
+            ssc = copy.filter_factory({
+                'object_post_as_copy': 'no',
+                '__file__': conffile.name
+            })("no app here")
 
         self.assertEqual(ssc.object_post_as_copy, False)
+        self.assertFalse(ssc.logger.get_lines_for_level('warning'))
+
+    def _test_post_as_copy_emits_warning(self, conf):
+        with mock.patch('swift.common.middleware.copy.get_logger',
+                        return_value=debug_logger('copy')):
+            ssc = copy.filter_factory(conf)("no app here")
+
+        self.assertEqual(ssc.object_post_as_copy, True)
+        log_lines = ssc.logger.get_lines_for_level('warning')
+        self.assertEqual(1, len(log_lines))
+        self.assertIn('object_post_as_copy=true is deprecated', log_lines[0])
+
+    def test_post_as_copy_emits_warning(self):
+        self._test_post_as_copy_emits_warning({'object_post_as_copy': 'yes'})
+
+        proxy_conf = dedent("""
+        [DEFAULT]
+        bind_ip = 10.4.5.6
+
+        [pipeline:main]
+        pipeline = catch_errors copy ye-olde-proxy-server
+
+        [filter:copy]
+        use = egg:swift#copy
+
+        [app:ye-olde-proxy-server]
+        use = egg:swift#proxy
+        object_post_as_copy = yes
+        """)
+
+        conffile = tempfile.NamedTemporaryFile()
+        conffile.write(proxy_conf)
+        conffile.flush()
+
+        self._test_post_as_copy_emits_warning({'__file__': conffile.name})
 
 
 @patch_policies(with_ec_default=True)

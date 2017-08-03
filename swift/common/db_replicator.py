@@ -89,11 +89,15 @@ def roundrobin_datadirs(datadirs):
             suffixes = os.listdir(part_dir)
             if not suffixes:
                 os.rmdir(part_dir)
+                continue
             for suffix in suffixes:
                 suff_dir = os.path.join(part_dir, suffix)
                 if not os.path.isdir(suff_dir):
                     continue
                 hashes = os.listdir(suff_dir)
+                if not hashes:
+                    os.rmdir(suff_dir)
+                    continue
                 for hsh in hashes:
                     hash_dir = os.path.join(suff_dir, hsh)
                     if not os.path.isdir(hash_dir):
@@ -101,6 +105,12 @@ def roundrobin_datadirs(datadirs):
                     object_file = os.path.join(hash_dir, hsh + '.db')
                     if os.path.exists(object_file):
                         yield (partition, object_file, node_id)
+                    else:
+                        try:
+                            os.rmdir(hash_dir)
+                        except OSError as e:
+                            if e.errno is not errno.ENOTEMPTY:
+                                raise
 
     its = [walk_datadir(datadir, node_id) for datadir, node_id in datadirs]
     while its:
@@ -172,14 +182,6 @@ class Replicator(Daemon):
         self.rsync_module = conf.get('rsync_module', '').rstrip('/')
         if not self.rsync_module:
             self.rsync_module = '{replication_ip}::%s' % self.server_type
-            if config_true_value(conf.get('vm_test_mode', 'no')):
-                self.logger.warning('Option %(type)s-replicator/vm_test_mode '
-                                    'is deprecated and will be removed in a '
-                                    'future version. Update your configuration'
-                                    ' to use option %(type)s-replicator/'
-                                    'rsync_module.'
-                                    % {'type': self.server_type})
-                self.rsync_module += '{replication_port}'
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
@@ -829,6 +831,7 @@ class ReplicatorRpc(object):
             objects = existing_broker.get_items_since(point, 1000)
             sleep()
         new_broker.newid(args[0])
+        new_broker.update_metadata(existing_broker.metadata)
         renamer(old_filename, db_file)
         return HTTPNoContent()
 

@@ -14,8 +14,6 @@
 # limitations under the License.
 
 
-import eventlet
-import eventlet.wsgi
 import eventlet.greenio
 from six.moves import urllib
 
@@ -257,7 +255,7 @@ class Receiver(object):
         try:
             df = self.diskfile_mgr.get_diskfile_from_hash(
                 self.device, self.partition, remote['object_hash'],
-                self.policy, frag_index=self.frag_index)
+                self.policy, frag_index=self.frag_index, open_expired=True)
         except exceptions.DiskFileNotExist:
             return {}
         try:
@@ -277,8 +275,8 @@ class Receiver(object):
             self.frag_index in df.fragments[remote['ts_data']] and
             (df.durable_timestamp is None or
              df.durable_timestamp < remote['ts_data'])):
-            # We have the frag, just missing a .durable, so try to create the
-            # .durable now. Try this just once to avoid looping if it fails.
+            # We have the frag, just missing durable state, so make the frag
+            # durable now. Try this just once to avoid looping if it fails.
             try:
                 with df.create() as writer:
                     writer.commit(remote['ts_data'])

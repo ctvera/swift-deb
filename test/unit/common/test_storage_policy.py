@@ -19,6 +19,7 @@ import unittest
 import os
 import mock
 from functools import partial
+
 from six.moves.configparser import ConfigParser
 from tempfile import NamedTemporaryFile
 from test.unit import patch_policies, FakeRing, temptree, DEFAULT_TEST_EC_TYPE
@@ -153,7 +154,7 @@ class TestStoragePolicies(unittest.TestCase):
             self.assertEqual(policy_string, get_policy_string(*expected))
 
     def test_defaults(self):
-        self.assertTrue(len(POLICIES) > 0)
+        self.assertGreater(len(POLICIES), 0)
 
         # test class functions
         default_policy = POLICIES.default
@@ -169,7 +170,11 @@ class TestStoragePolicies(unittest.TestCase):
                          StoragePolicy(2, 'cee', False),
                          ECStoragePolicy(10, 'ten',
                                          ec_type=DEFAULT_TEST_EC_TYPE,
-                                         ec_ndata=10, ec_nparity=3)]
+                                         ec_ndata=10, ec_nparity=3),
+                         ECStoragePolicy(11, 'eleven',
+                                         ec_type=DEFAULT_TEST_EC_TYPE,
+                                         ec_ndata=10, ec_nparity=3,
+                                         ec_duplication_factor=2)]
         policies = StoragePolicyCollection(test_policies)
         for policy in policies:
             policy_repr = repr(policy)
@@ -185,6 +190,10 @@ class TestStoragePolicies(unittest.TestCase):
                                 policy.ec_nparity in policy_repr)
                 self.assertTrue('ec_segment_size=%s' %
                                 policy.ec_segment_size in policy_repr)
+                if policy.ec_duplication_factor > 1:
+                    self.assertTrue('ec_duplication_factor=%s' %
+                                    policy.ec_duplication_factor in
+                                    policy_repr)
         collection_repr = repr(policies)
         collection_repr_lines = collection_repr.splitlines()
         self.assertTrue(
@@ -443,16 +452,21 @@ class TestStoragePolicies(unittest.TestCase):
             ECStoragePolicy(0, 'ec8-2', aliases='zeus, jupiter',
                             ec_type=DEFAULT_TEST_EC_TYPE,
                             ec_ndata=8, ec_nparity=2,
-                            object_ring=FakeRing(replicas=8),
+                            object_ring=FakeRing(replicas=10),
                             is_default=True),
             ECStoragePolicy(1, 'ec10-4', aliases='athena, minerva',
                             ec_type=DEFAULT_TEST_EC_TYPE,
                             ec_ndata=10, ec_nparity=4,
-                            object_ring=FakeRing(replicas=10)),
+                            object_ring=FakeRing(replicas=14)),
             ECStoragePolicy(2, 'ec4-2', aliases='poseidon, neptune',
                             ec_type=DEFAULT_TEST_EC_TYPE,
                             ec_ndata=4, ec_nparity=2,
-                            object_ring=FakeRing(replicas=7)),
+                            object_ring=FakeRing(replicas=6)),
+            ECStoragePolicy(3, 'ec4-2-dup', aliases='uzuki, rin',
+                            ec_type=DEFAULT_TEST_EC_TYPE,
+                            ec_ndata=4, ec_nparity=2,
+                            ec_duplication_factor=2,
+                            object_ring=FakeRing(replicas=12)),
         ]
         ec_policies = StoragePolicyCollection(good_test_policies_EC)
 
@@ -460,6 +474,10 @@ class TestStoragePolicies(unittest.TestCase):
             self.assertEqual(ec_policies.get_by_name(name), ec_policies[0])
         for name in ('ec10-4', 'athena', 'minerva'):
             self.assertEqual(ec_policies.get_by_name(name), ec_policies[1])
+        for name in ('ec4-2', 'poseidon', 'neptune'):
+            self.assertEqual(ec_policies.get_by_name(name), ec_policies[2])
+        for name in ('ec4-2-dup', 'uzuki', 'rin'):
+            self.assertEqual(ec_policies.get_by_name(name), ec_policies[3])
 
         # Testing parsing of conf files/text
         good_ec_conf = self._conf("""
@@ -478,6 +496,14 @@ class TestStoragePolicies(unittest.TestCase):
         ec_type = %(ec_type)s
         ec_num_data_fragments = 10
         ec_num_parity_fragments = 4
+        [storage-policy:2]
+        name = ec4-2-dup
+        aliases = uzuki, rin
+        policy_type = erasure_coding
+        ec_type = %(ec_type)s
+        ec_num_data_fragments = 4
+        ec_num_parity_fragments = 2
+        ec_duplication_factor = 2
         """ % {'ec_type': DEFAULT_TEST_EC_TYPE})
 
         ec_policies = parse_storage_policies(good_ec_conf)
@@ -485,6 +511,8 @@ class TestStoragePolicies(unittest.TestCase):
                          ec_policies[0])
         self.assertEqual(ec_policies.get_by_name('ec10-4'),
                          ec_policies.get_by_name('poseidon'))
+        self.assertEqual(ec_policies.get_by_name('ec4-2-dup'),
+                         ec_policies.get_by_name('uzuki'))
 
         name_repeat_ec_conf = self._conf("""
         [storage-policy:0]
@@ -544,7 +572,7 @@ class TestStoragePolicies(unittest.TestCase):
 
         # remove name
         policies.remove_policy_alias('tahi')
-        self.assertEqual(policies.get_by_name('tahi'), None)
+        self.assertIsNone(policies.get_by_name('tahi'))
 
         # remove only name
         self.assertRaisesWithMessage(PolicyError,
@@ -558,7 +586,7 @@ class TestStoragePolicies(unittest.TestCase):
 
         # remove default name
         policies.remove_policy_alias('two')
-        self.assertEqual(policies.get_by_name('two'), None)
+        self.assertIsNone(policies.get_by_name('two'))
         self.assertEqual(policies.get_by_index(2).name, 'rua')
 
         # change default name to a new name
@@ -622,7 +650,7 @@ class TestStoragePolicies(unittest.TestCase):
             parse_storage_policies(good_conf)
         mock_driver.assert_called_once()
         mock_driver.reset_mock()
-        self.assertFalse([(r.levelname, r.message) for r in records])
+        self.assertFalse([(r.levelname, r.msg) for r in records])
 
         good_conf = self._conf("""
         [storage-policy:0]
@@ -637,7 +665,7 @@ class TestStoragePolicies(unittest.TestCase):
             parse_storage_policies(good_conf)
         mock_driver.assert_called_once()
         mock_driver.reset_mock()
-        self.assertFalse([(r.levelname, r.message) for r in records])
+        self.assertFalse([(r.levelname, r.msg) for r in records])
 
         bad_conf = self._conf("""
         [storage-policy:0]
@@ -648,18 +676,21 @@ class TestStoragePolicies(unittest.TestCase):
         ec_num_parity_fragments = 5
         """)
 
-        with capture_logging('swift.common.storage_policy') as records:
+        with capture_logging('swift.common.storage_policy') as records, \
+                self.assertRaises(PolicyError) as exc_mgr:
             parse_storage_policies(bad_conf)
-        mock_driver.assert_called_once()
+        self.assertEqual(exc_mgr.exception.message,
+                         'Storage policy bad-policy uses an EC '
+                         'configuration known to harm data durability. This '
+                         'policy MUST be deprecated.')
+        mock_driver.assert_not_called()
         mock_driver.reset_mock()
         self.assertEqual([r.levelname for r in records],
-                         ['WARNING', 'WARNING'])
+                         ['WARNING'])
         for msg in ('known to harm data durability',
                     'Any data in this policy should be migrated',
                     'https://bugs.launchpad.net/swift/+bug/1639691'):
-            self.assertIn(msg, records[0].message)
-        self.assertIn('In a future release, this will prevent services from '
-                      'starting', records[1].message)
+            self.assertIn(msg, records[0].msg)
 
         slightly_less_bad_conf = self._conf("""
         [storage-policy:0]
@@ -688,7 +719,7 @@ class TestStoragePolicies(unittest.TestCase):
         for msg in ('known to harm data durability',
                     'Any data in this policy should be migrated',
                     'https://bugs.launchpad.net/swift/+bug/1639691'):
-            self.assertIn(msg, records[0].message)
+            self.assertIn(msg, records[0].msg)
 
     def test_no_default(self):
         orig_conf = self._conf("""
@@ -1020,7 +1051,7 @@ class TestStoragePolicies(unittest.TestCase):
         with NamedTemporaryFile() as f:
             conf.write(f)
             f.flush()
-            with mock.patch('swift.common.storage_policy.SWIFT_CONF_FILE',
+            with mock.patch('swift.common.utils.SWIFT_CONF_FILE',
                             new=f.name):
                 try:
                     reload_storage_policies()
@@ -1243,11 +1274,16 @@ class TestStoragePolicies(unittest.TestCase):
                             ec_ndata=8, ec_nparity=2),
             ECStoragePolicy(11, 'df10-6', ec_type='flat_xor_hd_4',
                             ec_ndata=10, ec_nparity=6),
+            ECStoragePolicy(12, 'ec4-2-dup', ec_type=DEFAULT_TEST_EC_TYPE,
+                            ec_ndata=4, ec_nparity=2, ec_duplication_factor=2),
         ]
         for ec_policy in test_ec_policies:
             k = ec_policy.ec_ndata
-            expected_size = \
-                k + ec_policy.pyeclib_driver.min_parity_fragments_needed()
+            expected_size = (
+                (k + ec_policy.pyeclib_driver.min_parity_fragments_needed())
+                * ec_policy.ec_duplication_factor
+            )
+
             self.assertEqual(expected_size, ec_policy.quorum)
 
     def test_validate_ring(self):
@@ -1259,25 +1295,27 @@ class TestStoragePolicies(unittest.TestCase):
                             ec_ndata=10, ec_nparity=4),
             ECStoragePolicy(2, 'ec4-2', ec_type=DEFAULT_TEST_EC_TYPE,
                             ec_ndata=4, ec_nparity=2),
+            ECStoragePolicy(3, 'ec4-2-2dup', ec_type=DEFAULT_TEST_EC_TYPE,
+                            ec_ndata=4, ec_nparity=2,
+                            ec_duplication_factor=2)
         ]
-        actual_load_ring_replicas = [8, 10, 7]
+        actual_load_ring_replicas = [8, 10, 7, 11]
         policies = StoragePolicyCollection(test_policies)
 
-        def create_mock_ring_data(num_replica):
-            class mock_ring_data_klass(object):
-                def __init__(self):
-                    self._replica2part2dev_id = [0] * num_replica
-
-            return mock_ring_data_klass()
+        class MockRingData(object):
+            def __init__(self, num_replica):
+                self._replica2part2dev_id = [0] * num_replica
 
         for policy, ring_replicas in zip(policies, actual_load_ring_replicas):
             with mock.patch('swift.common.ring.ring.RingData.load',
-                            return_value=create_mock_ring_data(ring_replicas)):
+                            return_value=MockRingData(ring_replicas)):
+                necessary_replica_num = \
+                    policy.ec_n_unique_fragments * policy.ec_duplication_factor
                 with mock.patch(
                         'swift.common.ring.ring.validate_configuration'):
                     msg = 'EC ring for policy %s needs to be configured with ' \
                           'exactly %d replicas.' % \
-                          (policy.name, policy.ec_ndata + policy.ec_nparity)
+                          (policy.name, necessary_replica_num)
                     self.assertRaisesWithMessage(RingLoadError, msg,
                                                  policy.load_ring, 'mock')
 
@@ -1332,6 +1370,7 @@ class TestStoragePolicies(unittest.TestCase):
                 'ec_num_data_fragments': 10,
                 'ec_num_parity_fragments': 3,
                 'ec_object_segment_size': DEFAULT_EC_OBJECT_SEGMENT_SIZE,
+                'ec_duplication_factor': 1,
             },
             (10, False): {
                 'name': 'ten',
@@ -1348,11 +1387,29 @@ class TestStoragePolicies(unittest.TestCase):
                 'ec_num_data_fragments': 10,
                 'ec_num_parity_fragments': 3,
                 'ec_object_segment_size': DEFAULT_EC_OBJECT_SEGMENT_SIZE,
+                'ec_duplication_factor': 1,
             },
             (11, False): {
                 'name': 'done',
                 'aliases': 'done',
                 'deprecated': True,
+            },
+            # enabled ec with ec_duplication
+            (12, True): {
+                'name': 'twelve',
+                'aliases': 'twelve',
+                'default': False,
+                'deprecated': False,
+                'policy_type': EC_POLICY,
+                'ec_type': DEFAULT_TEST_EC_TYPE,
+                'ec_num_data_fragments': 10,
+                'ec_num_parity_fragments': 3,
+                'ec_object_segment_size': DEFAULT_EC_OBJECT_SEGMENT_SIZE,
+                'ec_duplication_factor': 2,
+            },
+            (12, False): {
+                'name': 'twelve',
+                'aliases': 'twelve',
             },
         }
         self.maxDiff = None

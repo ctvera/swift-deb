@@ -27,8 +27,9 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.ring import Ring
 from swift.common.utils import get_logger, renamer, write_pickle, \
-    dump_recon_cache, config_true_value, ismount
+    dump_recon_cache, config_true_value, ismount, ratelimit_sleep
 from swift.common.daemon import Daemon
+from swift.common.header_key_dict import HeaderKeyDict
 from swift.common.storage_policy import split_policy_string, PolicyError
 from swift.obj.diskfile import get_tmp_dir, ASYNCDIR_BASE
 from swift.common.http import is_success, HTTP_INTERNAL_SERVER_ERROR
@@ -46,7 +47,19 @@ class ObjectUpdater(Daemon):
         self.interval = int(conf.get('interval', 300))
         self.container_ring = None
         self.concurrency = int(conf.get('concurrency', 1))
-        self.slowdown = float(conf.get('slowdown', 0.01))
+        if 'slowdown' in conf:
+            self.logger.warning(
+                'The slowdown option is deprecated in favor of '
+                'objects_per_second. This option may be ignored in a '
+                'future release.')
+            objects_per_second = 1 / (
+                float(conf.get('slowdown', '0.01')) + 0.01)
+        else:
+            objects_per_second = 50
+        self.objects_running_time = 0
+        self.max_objects_per_second = \
+            float(conf.get('objects_per_second',
+                           objects_per_second))
         self.node_timeout = float(conf.get('node_timeout', 10))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.successes = 0
@@ -188,7 +201,10 @@ class ObjectUpdater(Daemon):
                         self.process_object_update(update_path, device,
                                                    policy)
                         last_obj_hash = obj_hash
-                    time.sleep(self.slowdown)
+
+                    self.objects_running_time = ratelimit_sleep(
+                        self.objects_running_time,
+                        self.max_objects_per_second)
                 try:
                     os.rmdir(prefix_path)
                 except OSError:
@@ -218,7 +234,7 @@ class ObjectUpdater(Daemon):
             update['account'], update['container'])
         obj = '/%s/%s/%s' % \
               (update['account'], update['container'], update['obj'])
-        headers_out = update['headers'].copy()
+        headers_out = HeaderKeyDict(update['headers'])
         headers_out['user-agent'] = 'object-updater %s' % os.getpid()
         headers_out.setdefault('X-Backend-Storage-Policy-Index',
                                str(int(policy)))
@@ -270,7 +286,7 @@ class ObjectUpdater(Daemon):
                 resp.read()
                 success = is_success(resp.status)
                 if not success:
-                    self.logger.error(
+                    self.logger.debug(
                         _('Error code %(status)d is returned from remote '
                           'server %(ip)s: %(port)s / %(device)s'),
                         {'status': resp.status, 'ip': node['ip'],

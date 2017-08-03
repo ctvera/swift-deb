@@ -1,3 +1,12 @@
+========================
+Team and repository tags
+========================
+
+.. image:: https://governance.openstack.org/badges/swift.svg
+    :target: https://governance.openstack.org/reference/tags/index.html
+
+.. Change things from this point on
+
 Swift
 =====
 
@@ -46,9 +55,9 @@ Tests
 
 There are three types of tests included in Swift's source tree.
 
- #. Unit tests
- #. Functional tests
- #. Probe tests
+#. Unit tests
+#. Functional tests
+#. Probe tests
 
 Unit tests check that small sections of the code behave properly. For example,
 a unit test may test a single function to ensure that various input gives the

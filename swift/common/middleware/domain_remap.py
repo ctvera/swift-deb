@@ -50,8 +50,13 @@ advised. With container sync, you should use the true storage end points as
 sync destinations.
 """
 
+from swift.common.middleware import RewriteContext
 from swift.common.swob import Request, HTTPBadRequest
 from swift.common.utils import list_from_csv, register_swift_info
+
+
+class _DomainRemapContext(RewriteContext):
+    base_re = r'^(https?://[^/]+)%s(.*)$'
 
 
 class DomainRemapMiddleware(object):
@@ -67,10 +72,13 @@ class DomainRemapMiddleware(object):
 
     def __init__(self, app, conf):
         self.app = app
-        self.storage_domain = conf.get('storage_domain', 'example.com')
-        if self.storage_domain and not self.storage_domain.startswith('.'):
-            self.storage_domain = '.' + self.storage_domain
-        self.path_root = conf.get('path_root', 'v1').strip('/')
+        storage_domain = conf.get('storage_domain', 'example.com')
+        self.storage_domain = ['.' + s for s in
+                               list_from_csv(storage_domain)
+                               if not s.startswith('.')]
+        self.storage_domain += [s for s in list_from_csv(storage_domain)
+                                if s.startswith('.')]
+        self.path_root = '/' + conf.get('path_root', 'v1').strip('/')
         prefixes = conf.get('reseller_prefixes', 'AUTH')
         self.reseller_prefixes = list_from_csv(prefixes)
         self.reseller_prefixes_lower = [x.lower()
@@ -87,8 +95,10 @@ class DomainRemapMiddleware(object):
         port = ''
         if ':' in given_domain:
             given_domain, port = given_domain.rsplit(':', 1)
-        if given_domain.endswith(self.storage_domain):
-            parts_to_parse = given_domain[:-len(self.storage_domain)]
+        storage_domain = next((domain for domain in self.storage_domain
+                               if given_domain.endswith(domain)), None)
+        if storage_domain:
+            parts_to_parse = given_domain[:-len(storage_domain)]
             parts_to_parse = parts_to_parse.strip('.').split('.')
             len_parts_to_parse = len(parts_to_parse)
             if len_parts_to_parse == 2:
@@ -119,16 +129,21 @@ class DomainRemapMiddleware(object):
                     # account prefix is not in config list. bail.
                     return self.app(env, start_response)
 
-            path = env['PATH_INFO'].strip('/')
-            new_path_parts = ['', self.path_root, account]
+            requested_path = path = env['PATH_INFO']
+            new_path_parts = [self.path_root, account]
             if container:
                 new_path_parts.append(container)
             if path.startswith(self.path_root):
-                path = path[len(self.path_root):].lstrip('/')
-            if path:
-                new_path_parts.append(path)
+                path = path[len(self.path_root):]
+            if path.startswith('/'):
+                path = path[1:]
+            new_path_parts.append(path)
             new_path = '/'.join(new_path_parts)
             env['PATH_INFO'] = new_path
+
+            context = _DomainRemapContext(self.app, requested_path, new_path)
+            return context.handle_request(env, start_response)
+
         return self.app(env, start_response)
 
 

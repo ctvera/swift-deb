@@ -142,6 +142,9 @@ backend node. The default is 60.
 The default is 65536.
 .IP \fBdisk_chunk_size\fR
 The default is 65536.
+.IP \fBreclaim_age\fR
+Time elapsed in seconds before an object can be reclaimed. The default is
+604800 seconds.
 .IP \fBnice_priority\fR
 Modify scheduling priority of server processes. Niceness values range from -20
 (most favorable to the process) to 19 (least favorable to the process).
@@ -211,9 +214,6 @@ This list is in addition to X-Object-Meta-* headers and cannot include Content-T
 The default is 'Content-Disposition, Content-Encoding, X-Delete-At, X-Object-Manifest, X-Static-Large-Object'.
 .IP "\fBauto_create_account_prefix\fR"
 The default is '.'.
-.IP "\fBthreads_per_disk\fR"
-A value of 0 means "don't use thread pools". A reasonable starting point is
-4. The default is 0.
 .IP "\fBreplication_server\fR"
 Configure parameter for creating specific server
 To handle all verbs, including replication verbs, do not specify
@@ -379,7 +379,7 @@ a different region than the local one.
 NOTE: Objects that are already compressed (for example: .tar.gz, .mp3) might
 slow down the syncing process. The default is false.
 .IP \fBrsync_module\fR
-Format of the rysnc module where the replicator will send data. See
+Format of the rsync module where the replicator will send data. See
 etc/rsyncd.conf-sample for some usage examples. The default is empty.
 .IP \fBnode_timeout\fR
 Request timeout to external services. The default is 10 seconds.
@@ -394,9 +394,6 @@ default is 1800 seconds.
 The default is 15.
 .IP \fBrsync_error_log_line_length\fR
 Limits how long rsync error log lines are. 0 (default) means to log the entire line.
-.IP \fBreclaim_age\fR
-Time elapsed in seconds before an object can be reclaimed. The default is
-604800 seconds.
 .IP "\fBrecon_cache_path\fR"
 The recon_cache_path simply sets the directory where stats for a few items will be stored.
 Depending on the method of deployment you may need to create this directory manually
@@ -468,9 +465,6 @@ Attempts to kill all workers if nothing replicates for lockup_timeout seconds. T
 default is 1800 seconds.
 .IP \fBring_check_interval\fR
 The default is 15.
-.IP \fBreclaim_age\fR
-Time elapsed in seconds before an object can be reclaimed. The default is
-604800 seconds.
 .IP "\fBrecon_cache_path\fR"
 The recon_cache_path simply sets the directory where stats for a few items will be stored.
 Depending on the method of deployment you may need to create this directory manually
@@ -503,8 +497,10 @@ Minimum time for a pass to take. The default is 300 seconds.
 Number of reaper workers to spawn. The default is 1.
 .IP \fBnode_timeout\fR
 Request timeout to external services. The default is 10 seconds.
+.IP \fBobjects_per_second\fR
+Maximum objects updated per second. Should be tuned according to individual system specs. 0 is unlimited. The default is 50.
 .IP \fBslowdown\fR
-Slowdown will sleep that amount between objects. The default is 0.01 seconds.
+Slowdown will sleep that amount between objects. The default is 0.01 seconds. Deprecated in favor of objects_per_second.
 .IP "\fBrecon_cache_path\fR"
 The recon_cache_path simply sets the directory where stats for a few items will be stored.
 Depending on the method of deployment you may need to create this directory manually
@@ -588,9 +584,9 @@ Ignored if IOPRIO_CLASS_IDLE is set.
 .LP
 More in depth documentation about the swift-object-server and
 also OpenStack Swift as a whole can be found at
-.BI http://swift.openstack.org/admin_guide.html
+.BI http://docs.openstack.org/developer/swift/admin_guide.html
 and
-.BI http://swift.openstack.org
+.BI http://docs.openstack.org/developer/swift
 
 
 .SH "SEE ALSO"

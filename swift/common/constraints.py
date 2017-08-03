@@ -67,7 +67,7 @@ EFFECTIVE_CONSTRAINTS = {}  # populated by reload_constraints
 
 def reload_constraints():
     """
-    Parse SWIFT_CONF_FILE and reset module level global contraint attrs,
+    Parse SWIFT_CONF_FILE and reset module level global constraint attrs,
     populating OVERRIDE_CONSTRAINTS AND EFFECTIVE_CONSTRAINTS along the way.
     """
     global SWIFT_CONSTRAINTS_LOADED, OVERRIDE_CONSTRAINTS
@@ -277,7 +277,7 @@ def valid_timestamp(request):
     :param request: the swob request object
 
     :returns: a valid Timestamp instance
-    :raises: HTTPBadRequest on missing or invalid X-Timestamp
+    :raises HTTPBadRequest: on missing or invalid X-Timestamp
     """
     try:
         return request.timestamp
@@ -320,7 +320,8 @@ def check_delete_headers(request):
             raise HTTPBadRequest(request=request, content_type='text/plain',
                                  body='Non-integer X-Delete-At')
 
-        if x_delete_at < time.time():
+        if x_delete_at < time.time() and not utils.config_true_value(
+                request.headers.get('x-backend-replication', 'f')):
             raise HTTPBadRequest(request=request, content_type='text/plain',
                                  body='X-Delete-At in past')
     return request
@@ -363,7 +364,7 @@ def check_name_format(req, name, target_type):
     :param name: header value to validate
     :param target_type: which header is being validated (Account or Container)
     :returns: A properly encoded account name or container name
-    :raise: HTTPPreconditionFailed if account header
+    :raise HTTPPreconditionFailed: if account header
             is not well formatted.
     """
     if not name:
@@ -385,9 +386,11 @@ check_container_format = functools.partial(check_name_format,
 
 
 def valid_api_version(version):
-    """ Checks if the requested version is valid.
+    """
+    Checks if the requested version is valid.
 
-    Currently Swift only supports "v1" and "v1.0". """
+    Currently Swift only supports "v1" and "v1.0".
+    """
     global VALID_API_VERSIONS
     if not isinstance(VALID_API_VERSIONS, list):
         VALID_API_VERSIONS = [str(VALID_API_VERSIONS)]

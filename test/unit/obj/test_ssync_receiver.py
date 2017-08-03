@@ -35,6 +35,7 @@ from swift.obj.reconstructor import ObjectReconstructor
 
 from test import listen_zero, unit
 from test.unit import debug_logger, patch_policies, make_timestamp_iter
+from test.unit.obj.common import write_diskfile
 
 
 @unit.patch_policies()
@@ -165,7 +166,7 @@ class TestReceiver(unittest.TestCase):
             [':MISSING_CHECK: START', ':MISSING_CHECK: END',
              ':UPDATES: START', ':UPDATES: END'])
         self.assertEqual(rcvr.policy, POLICIES[1])
-        self.assertEqual(rcvr.frag_index, None)
+        self.assertIsNone(rcvr.frag_index)
 
     def test_Receiver_with_bad_storage_policy_index_header(self):
         valid_indices = sorted([int(policy) for policy in POLICIES])
@@ -207,7 +208,7 @@ class TestReceiver(unittest.TestCase):
              ':UPDATES: START', ':UPDATES: END'])
         self.assertEqual(rcvr.policy, POLICIES[1])
         self.assertEqual(rcvr.frag_index, 7)
-        self.assertEqual(rcvr.node_index, None)
+        self.assertIsNone(rcvr.node_index)
 
     @unit.patch_policies()
     def test_Receiver_with_only_node_index_header(self):
@@ -665,13 +666,43 @@ class TestReceiver(unittest.TestCase):
         self.assertFalse(self.controller.logger.error.called)
         self.assertFalse(self.controller.logger.exception.called)
 
+    def test_MISSING_CHECK_missing_meta_expired_data(self):
+        # verify that even when rx disk file has expired x-delete-at, it will
+        # still be opened and checked for missing meta
+        self.controller.logger = mock.MagicMock()
+        ts1 = next(make_timestamp_iter())
+        df = self.controller.get_diskfile(
+            'sda1', '1', self.account1, self.container1, self.object1,
+            POLICIES[0])
+        write_diskfile(df, ts1, extra_metadata={'X-Delete-At': 0})
+
+        # make a request - expect newer metadata to be wanted
+        req = swob.Request.blank(
+            '/sda1/1',
+            environ={'REQUEST_METHOD': 'SSYNC',
+                     'HTTP_X_BACKEND_STORAGE_POLICY_INDEX': '0'},
+            body=':MISSING_CHECK: START\r\n' +
+                 self.hash1 + ' ' + ts1.internal + ' m:30d40\r\n'
+                 ':MISSING_CHECK: END\r\n'
+                 ':UPDATES: START\r\n:UPDATES: END\r\n')
+        resp = req.get_response(self.controller)
+        self.assertEqual(
+            self.body_lines(resp.body),
+            [':MISSING_CHECK: START',
+             'c2519f265f9633e74f9b2fe3b9bec27d m',
+             ':MISSING_CHECK: END',
+             ':UPDATES: START', ':UPDATES: END'])
+        self.assertEqual(resp.status_int, 200)
+        self.assertFalse(self.controller.logger.error.called)
+        self.assertFalse(self.controller.logger.exception.called)
+
     @patch_policies(with_ec_default=True)
     def test_MISSING_CHECK_missing_durable(self):
         self.controller.logger = mock.MagicMock()
         self.controller._diskfile_router = diskfile.DiskFileRouter(
             self.conf, self.controller.logger)
 
-        # make rx disk file but don't commit it, so .durable is missing
+        # make rx disk file but don't commit it, so durable state is missing
         ts1 = next(make_timestamp_iter()).internal
         object_dir = utils.storage_directory(
             os.path.join(self.testdir, 'sda1',
@@ -714,7 +745,7 @@ class TestReceiver(unittest.TestCase):
         self.controller._diskfile_router = diskfile.DiskFileRouter(
             self.conf, self.controller.logger)
 
-        # make rx disk file but don't commit it, so .durable is missing
+        # make rx disk file but don't commit it, so durable state is missing
         ts1 = next(make_timestamp_iter()).internal
         object_dir = utils.storage_directory(
             os.path.join(self.testdir, 'sda1',
@@ -1486,7 +1517,7 @@ class TestReceiver(unittest.TestCase):
             self.assertFalse(self.controller.logger.error.called)
             req = _POST_request[0]
             self.assertEqual(req.path, '/device/partition/a/c/o')
-            self.assertEqual(req.content_length, None)
+            self.assertIsNone(req.content_length)
             self.assertEqual(req.headers, {
                 'X-Timestamp': '1364456113.12344',
                 'X-Object-Meta-Test1': 'one',
@@ -1672,7 +1703,7 @@ class TestReceiver(unittest.TestCase):
         self.controller.logger.exception.assert_called_once_with(
             'None/device/partition EXCEPTION in ssync.Receiver')
         self.assertEqual(len(_BONK_request), 1)  # sanity
-        self.assertEqual(_BONK_request[0], None)
+        self.assertIsNone(_BONK_request[0])
 
     def test_UPDATES_multiple(self):
         _requests = []
@@ -1834,7 +1865,7 @@ class TestReceiver(unittest.TestCase):
             req = _requests.pop(0)
             self.assertEqual(req.method, 'POST')
             self.assertEqual(req.path, '/device/partition/a/c/o7')
-            self.assertEqual(req.content_length, None)
+            self.assertIsNone(req.content_length)
             self.assertEqual(req.headers, {
                 'X-Timestamp': '1364456113.00008',
                 'X-Object-Meta-Test-User': 'user_meta',

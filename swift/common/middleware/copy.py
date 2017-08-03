@@ -117,18 +117,15 @@ Object Post as Copy
 -------------------
 Historically, this has been a feature (and a configurable option with default
 set to True) in proxy server configuration. This has been moved to server side
-copy middleware.
+copy middleware and the default changed to False.
 
-When ``object_post_as_copy`` is set to ``true`` (default value), an incoming
-POST request is morphed into a COPY request where source and destination
-objects are same.
+When ``object_post_as_copy`` is set to ``true``, an incoming POST request is
+morphed into a COPY request where source and destination objects are same.
 
 This feature was necessary because of a previous behavior where POSTS would
 update the metadata on the object but not on the container. As a result,
 features like container sync would not work correctly. This is no longer the
-case and the plan is to deprecate this option. It is being kept now for
-backwards compatibility. At first chance, set ``object_post_as_copy`` to
-``false``.
+case and this option is now deprecated. It will be removed in a future release.
 """
 
 import os
@@ -159,7 +156,7 @@ def _check_path_header(req, name, length, error_msg):
     :param length: length of path segment check
     :param error_msg: error message for client
     :returns: A tuple with path parts according to length
-    :raise: HTTPPreconditionFailed if header value
+    :raise HTTPPreconditionFailed: if header value
             is not well formatted.
     """
     src_header = unquote(req.headers.get(name))
@@ -181,7 +178,7 @@ def _check_copy_from_header(req):
 
     :param req: HTTP request object
     :returns: A tuple with container name and object name
-    :raise: HTTPPreconditionFailed if x-copy-from value
+    :raise HTTPPreconditionFailed: if x-copy-from value
             is not well formatted.
     """
     return _check_path_header(req, 'X-Copy-From', 2,
@@ -197,7 +194,7 @@ def _check_destination_header(req):
 
     :param req: HTTP request object
     :returns: A tuple with container name and object name
-    :raise: HTTPPreconditionFailed if destination value
+    :raise HTTPPreconditionFailed: if destination value
             is not well formatted.
     """
     return _check_path_header(req, 'Destination', 2,
@@ -277,7 +274,13 @@ class ServerSideCopyMiddleware(object):
         # problems during upgrade.
         self._load_object_post_as_copy_conf(conf)
         self.object_post_as_copy = \
-            config_true_value(conf.get('object_post_as_copy', 'true'))
+            config_true_value(conf.get('object_post_as_copy', 'false'))
+        if self.object_post_as_copy:
+            msg = ('object_post_as_copy=true is deprecated; remove all '
+                   'references to it from %s to disable this warning. This '
+                   'option will be ignored in a future release' % conf.get(
+                       '__file__', 'proxy-server.conf'))
+            self.logger.warning(msg)
 
     def _load_object_post_as_copy_conf(self, conf):
         if ('object_post_as_copy' in conf or '__file__' not in conf):
@@ -410,9 +413,11 @@ class ServerSideCopyMiddleware(object):
             # which currently only happens because there are more than
             # CONTAINER_LISTING_LIMIT segments in a segmented object. In
             # this case, we're going to refuse to do the server-side copy.
+            close_if_possible(source_resp.app_iter)
             return HTTPRequestEntityTooLarge(request=req)
 
         if source_resp.content_length > MAX_FILE_SIZE:
+            close_if_possible(source_resp.app_iter)
             return HTTPRequestEntityTooLarge(request=req)
 
         return source_resp
@@ -423,8 +428,8 @@ class ServerSideCopyMiddleware(object):
         resp_headers['X-Copied-From-Account'] = quote(acct)
         resp_headers['X-Copied-From'] = quote(path)
         if 'last-modified' in source_resp.headers:
-                resp_headers['X-Copied-From-Last-Modified'] = \
-                    source_resp.headers['last-modified']
+            resp_headers['X-Copied-From-Last-Modified'] = \
+                source_resp.headers['last-modified']
         # Existing sys and user meta of source object is added to response
         # headers in addition to the new ones.
         _copy_headers(sink_req.headers, resp_headers)
@@ -456,7 +461,6 @@ class ServerSideCopyMiddleware(object):
         ssc_ctx = ServerSideCopyWebContext(self.app, self.logger)
         source_resp = self._get_source_object(ssc_ctx, source_path, req)
         if source_resp.status_int >= HTTP_MULTIPLE_CHOICES:
-            close_if_possible(source_resp.app_iter)
             return source_resp(source_resp.environ, start_response)
 
         # Create a new Request object based on the original request instance.
@@ -498,7 +502,9 @@ class ServerSideCopyMiddleware(object):
                         source_resp.headers['X-Object-Manifest']
             sink_req.params = params
 
-        # Set data source, content length and etag for the PUT request
+        # Set swift.source, data source, content length and etag
+        # for the PUT request
+        sink_req.environ['swift.source'] = 'SSC'
         sink_req.environ['wsgi.input'] = FileLikeIter(source_resp.app_iter)
         sink_req.content_length = source_resp.content_length
         if (source_resp.status_int == HTTP_OK and

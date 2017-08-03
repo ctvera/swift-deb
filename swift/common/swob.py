@@ -52,7 +52,7 @@ from six.moves import urllib
 
 from swift.common.header_key_dict import HeaderKeyDict
 from swift.common.utils import reiterate, split_path, Timestamp, pairs, \
-    close_if_possible
+    close_if_possible, closing_if_possible
 from swift.common.exceptions import InvalidTimestamp
 
 
@@ -308,7 +308,8 @@ def _resp_body_property():
         if not self._body:
             if not self._app_iter:
                 return ''
-            self._body = ''.join(self._app_iter)
+            with closing_if_possible(self._app_iter):
+                self._body = ''.join(self._app_iter)
             self._app_iter = None
         return self._body
 
@@ -485,8 +486,10 @@ class Range(object):
             else:
                 start = None
             if end:
-                # when end contains non numeric value, this also causes
-                # ValueError
+                # We could just rely on int() raising the ValueError, but
+                # this catches things like '--0'
+                if not end.isdigit():
+                    raise ValueError('Invalid Range header: %s' % headerval)
                 end = int(end)
                 if end < 0:
                     raise ValueError('Invalid Range header: %s' % headerval)
@@ -1027,7 +1030,7 @@ class Request(object):
                                trailing data, raises ValueError.
         :returns: list of segments with a length of maxsegs (non-existent
                   segments will return as None)
-        :raises: ValueError if given an invalid path
+        :raises ValueError: if given an invalid path
         """
         return split_path(
             self.environ.get('SCRIPT_NAME', '') + self.environ['PATH_INFO'],
@@ -1247,9 +1250,13 @@ class Response(object):
             ranges = self.request.range.ranges_for_length(self.content_length)
             if ranges == []:
                 self.status = 416
-                self.content_length = 0
                 close_if_possible(app_iter)
-                return ['']
+                self.headers['Content-Range'] = \
+                    'bytes */%d' % self.content_length
+                # Setting body + app_iter to None makes us emit the default
+                # body text from RESPONSE_REASONS.
+                body = None
+                app_iter = None
             elif ranges:
                 range_size = len(ranges)
                 if range_size > 0:

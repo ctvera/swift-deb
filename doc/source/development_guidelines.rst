@@ -19,11 +19,19 @@ themselves to catch regressions early.  Developers are also expected to keep
 the test suite up-to-date with any submitted code changes.
 
 Swift's tests and pep8 checks can be executed in an isolated environment
-with Tox: http://tox.testrun.org/
+with ``tox``: http://tox.testrun.org/
 
 To execute the tests:
 
-* Install Tox::
+* Ensure ``pip`` and ``virtualenv`` are upgraded to satisfy the version
+  requirements listed in the OpenStack `global requirements`_::
+
+    pip install pip -U
+    pip install virtualenv -U
+
+.. _`global requirements`: https://github.com/openstack/requirements/blob/master/global-requirements.txt
+
+* Install ``tox``::
 
     pip install tox
 
@@ -34,18 +42,18 @@ To execute the tests:
   Now install these packages using your distribution package manager
   like apt-get, dnf, yum, or zypper.
 
-* Run Tox from the root of the swift repo::
+* Run ``tox`` from the root of the swift repo::
 
     tox
 
-  Remarks:
+.. note::
   If you installed using ``cd ~/swift; sudo python setup.py develop``, you may
   need to do ``cd ~/swift; sudo chown -R ${USER}:${USER} swift.egg-info`` prior
-  to running tox.
+  to running ``tox``.
 
 * By default ``tox`` will run all of the unit test and pep8 checks listed in
   the ``tox.ini`` file ``envlist`` option. A subset of the test environments
-  can be specified on the tox command line or by setting the ``TOXENV``
+  can be specified on the ``tox`` command line or by setting the ``TOXENV``
   environment variable. For example, to run only the pep8 checks and python2.7
   unit tests use::
 
@@ -56,17 +64,17 @@ To execute the tests:
     TOXENV=py27,pep8 tox
 
 .. note::
-  As of tox version 2.0.0, most environment variables are not automatically
+  As of ``tox`` version 2.0.0, most environment variables are not automatically
   passed to the test environment. Swift's ``tox.ini`` overrides this default
   behavior so that variable names matching ``SWIFT_*`` and ``*_proxy`` will be
   passed, but you may need to run ``tox --recreate`` for this to take effect
-  after upgrading from tox<2.0.0.
+  after upgrading from ``tox`` <2.0.0.
 
   Conversely, if you do not want those environment variables to be passed to
   the test environment then you will need to unset them before calling ``tox``.
 
   Also, if you ever encounter DistributionNotFound, try to use ``tox
-  --recreate`` or remove the ``.tox`` directory to force tox to recreate the
+  --recreate`` or remove the ``.tox`` directory to force ``tox`` to recreate the
   dependency list.
 
 Swift's functional tests may be executed against a :doc:`development_saio` or
@@ -103,7 +111,7 @@ If the ``test.conf`` file is not found then the functional test framework will
 instantiate a set of Swift servers in the same process that executes the
 functional tests. This 'in-process test' mode may also be enabled (or disabled)
 by setting the environment variable ``SWIFT_TEST_IN_PROCESS`` to a true (or
-false) value prior to executing `tox -e func`.
+false) value prior to executing ``tox -e func``.
 
 When using the 'in-process test' mode some server configuration options may be
 set using environment variables:
@@ -113,27 +121,36 @@ set using environment variables:
 
 - encryption may be added to the proxy pipeline by setting the
   environment variable ``SWIFT_TEST_IN_PROCESS_CONF_LOADER`` to
-  ``encryption``.  Or when using tox, specify the tox environment
-  ``func-in-process-encryption``
+  ``encryption``.
 
-- the proxy-server ``object_post_as_copy`` option may be set using the
-  environment variable ``SWIFT_TEST_IN_PROCESS_OBJECT_POST_AS_COPY``.
+- a 2+1 EC policy may be installed as the default policy by setting the
+  environment variable ``SWIFT_TEST_IN_PROCESS_CONF_LOADER`` to
+  ``ec``.
+
+- the deprecated proxy-server ``object_post_as_copy`` option may be set using
+  the environment variable ``SWIFT_TEST_IN_PROCESS_OBJECT_POST_AS_COPY``.
 
 - logging to stdout may be enabled by setting ``SWIFT_TEST_DEBUG_LOGS``.
 
 For example, this command would run the in-process mode functional tests with
-the proxy-server using object_post_as_copy=False (the 'fast-POST' mode)::
+encryption enabled in the proxy-server::
 
-    SWIFT_TEST_IN_PROCESS=1 SWIFT_TEST_IN_PROCESS_OBJECT_POST_AS_COPY=False \
+    SWIFT_TEST_IN_PROCESS=1 SWIFT_TEST_IN_PROCESS_CONF_LOADER=encryption \
         tox -e func
 
-This particular example may also be run using the ``func-in-process-fast-post``
+This particular example may also be run using the ``func-encryption``
 tox environment::
 
-    tox -e func-in-process-fast-post
+    tox -e func-encryption
+
+The ``tox.ini`` file also specifies test environments for running other
+in-process functional test configurations, e.g.::
+
+  tox -e func-ec
+  tox -e func-post-as-copy
 
 To debug the functional tests, use the 'in-process test' mode and pass the
-``--pdb`` flag to tox::
+``--pdb`` flag to ``tox``::
 
     SWIFT_TEST_IN_PROCESS=1 tox -e func -- --pdb \
         test.functional.tests.TestFile.testCopy
@@ -195,19 +212,20 @@ The documentation in docstrings should follow the PEP 257 conventions
 
 More specifically:
 
-    1.  Triple quotes should be used for all docstrings.
-    2.  If the docstring is simple and fits on one line, then just use
-        one line.
-    3.  For docstrings that take multiple lines, there should be a newline
-        after the opening quotes, and before the closing quotes.
-    4.  Sphinx is used to build documentation, so use the restructured text
-        markup to designate parameters, return values, etc.  Documentation on
-        the sphinx specific markup can be found here:
-        http://sphinx.pocoo.org/markup/index.html
+#.  Triple quotes should be used for all docstrings.
+#.  If the docstring is simple and fits on one line, then just use
+    one line.
+#.  For docstrings that take multiple lines, there should be a newline
+    after the opening quotes, and before the closing quotes.
+#.  Sphinx is used to build documentation, so use the restructured text
+    markup to designate parameters, return values, etc.  Documentation on
+    the sphinx specific markup can be found here:
+    http://sphinx.pocoo.org/markup/index.html
 
 Installing Sphinx:
-  #. Install sphinx (On Ubuntu: `sudo apt-get install python-sphinx`)
-  #. `python setup.py build_sphinx`
+
+#. Install sphinx (On Ubuntu: ``sudo apt-get install python-sphinx``)
+#. ``python setup.py build_sphinx``
 
 --------
 Manpages

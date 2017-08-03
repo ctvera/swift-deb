@@ -24,9 +24,10 @@ from swift.common import exceptions, utils
 from swift.common.storage_policy import POLICIES
 from swift.common.utils import Timestamp
 from swift.obj import ssync_sender, diskfile, ssync_receiver
+from swift.obj.replicator import ObjectReplicator
 
-from test.unit import patch_policies, make_timestamp_iter
-from test.unit.obj.common import FakeReplicator, BaseTest
+from test.unit import patch_policies, make_timestamp_iter, debug_logger
+from test.unit.obj.common import BaseTest
 
 
 class NullBufferedHTTPConnection(object):
@@ -84,10 +85,10 @@ class TestSender(BaseTest):
 
     def setUp(self):
         super(TestSender, self).setUp()
-        self.testdir = os.path.join(self.tmpdir, 'tmp_test_ssync_sender')
-        utils.mkdirs(os.path.join(self.testdir, 'dev'))
-        self.daemon = FakeReplicator(self.testdir)
-        self.sender = ssync_sender.Sender(self.daemon, None, None, None)
+        self.daemon = ObjectReplicator(self.daemon_conf,
+                                       debug_logger('test-ssync-sender'))
+        job = {'policy': POLICIES.legacy}  # sufficient for Sender.__init__
+        self.sender = ssync_sender.Sender(self.daemon, None, job, None)
 
     def test_call_catches_MessageTimeout(self):
 
@@ -146,8 +147,7 @@ class TestSender(BaseTest):
                 '1.2.3.4:5678/sda1/9 EXCEPTION in ssync.Sender:'))
 
     def test_call_catches_exception_handling_exception(self):
-        job = node = None  # Will cause inside exception handler to fail
-        self.sender = ssync_sender.Sender(self.daemon, node, job, None)
+        self.sender.node = None  # Will cause inside exception handler to fail
         self.sender.suffixes = ['abc']
         self.sender.connect = 'cause exception'
         success, candidates = self.sender()
@@ -433,8 +433,6 @@ class TestSender(BaseTest):
             if device == 'dev' and partition == '9' and suffixes == ['abc'] \
                     and policy == POLICIES.legacy:
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000),
                      'ts_meta': Timestamp(1380155570.00005)})
@@ -459,7 +457,7 @@ class TestSender(BaseTest):
                 ':UPDATES: START\r\n'
                 ':UPDATES: END\r\n'
             ))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.connect = mock.MagicMock()
         df = mock.MagicMock()
         df.content_length = 0
@@ -483,8 +481,6 @@ class TestSender(BaseTest):
             if device == 'dev' and partition == '9' and suffixes == ['abc'] \
                     and policy == POLICIES.legacy:
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -505,7 +501,7 @@ class TestSender(BaseTest):
                 ':MISSING_CHECK: START\r\n'
                 '9d41d8cd98f00b204e9800998ecf0abc d\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.connect = mock.MagicMock()
         self.sender.updates = mock.MagicMock()
         self.sender.disconnect = mock.MagicMock()
@@ -521,8 +517,6 @@ class TestSender(BaseTest):
             if device == 'dev' and partition == '9' and suffixes == ['abc'] \
                     and policy == POLICIES.legacy:
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -541,7 +535,7 @@ class TestSender(BaseTest):
             chunk_body=(
                 ':MISSING_CHECK: START\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.connect = mock.MagicMock()
         self.sender.updates = mock.MagicMock()
         self.sender.disconnect = mock.MagicMock()
@@ -557,8 +551,6 @@ class TestSender(BaseTest):
             if device == 'dev' and partition == '9' and suffixes == ['abc'] \
                     and policy == POLICIES.legacy:
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -578,7 +570,7 @@ class TestSender(BaseTest):
                 ':MISSING_CHECK: START\r\n'
                 '9d41d8cd98f00b204e9800998ecf0abc d\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.connect = mock.MagicMock()
         self.sender.updates = mock.MagicMock()
         self.sender.disconnect = mock.MagicMock()
@@ -743,7 +735,7 @@ class TestSender(BaseTest):
             chunk_body=(
                 ':MISSING_CHECK: START\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.missing_check()
         self.assertEqual(
             ''.join(self.sender.connection.sent),
@@ -758,19 +750,13 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc', 'def']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
                 yield (
-                    '/srv/node/dev/objects/9/def/'
-                    '9d41d8cd98f00b204e9800998ecf0def',
                     '9d41d8cd98f00b204e9800998ecf0def',
                     {'ts_data': Timestamp(1380144472.22222),
                      'ts_meta': Timestamp(1380144473.22222)})
                 yield (
-                    '/srv/node/dev/objects/9/def/'
-                    '9d41d8cd98f00b204e9800998ecf1def',
                     '9d41d8cd98f00b204e9800998ecf1def',
                     {'ts_data': Timestamp(1380144474.44444),
                      'ts_ctype': Timestamp(1380144474.44448),
@@ -791,7 +777,7 @@ class TestSender(BaseTest):
             chunk_body=(
                 ':MISSING_CHECK: START\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.missing_check()
         self.assertEqual(
             ''.join(self.sender.connection.sent),
@@ -820,8 +806,6 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -836,7 +820,7 @@ class TestSender(BaseTest):
             'policy': POLICIES.legacy,
         }
         self.sender.suffixes = ['abc']
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.response = FakeResponse(chunk_body='\r\n')
         exc = None
         try:
@@ -859,8 +843,6 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -875,7 +857,7 @@ class TestSender(BaseTest):
             'policy': POLICIES.legacy,
         }
         self.sender.suffixes = ['abc']
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.response = FakeResponse(
             chunk_body=':MISSING_CHECK: START\r\n')
         exc = None
@@ -899,8 +881,6 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -915,7 +895,7 @@ class TestSender(BaseTest):
             'policy': POLICIES.legacy,
         }
         self.sender.suffixes = ['abc']
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.response = FakeResponse(chunk_body='OH HAI\r\n')
         exc = None
         try:
@@ -938,8 +918,6 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -959,7 +937,7 @@ class TestSender(BaseTest):
                 ':MISSING_CHECK: START\r\n'
                 '0123abc dm\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.missing_check()
         self.assertEqual(
             ''.join(self.sender.connection.sent),
@@ -980,8 +958,6 @@ class TestSender(BaseTest):
                     policy == POLICIES.legacy and
                     suffixes == ['abc']):
                 yield (
-                    '/srv/node/dev/objects/9/abc/'
-                    '9d41d8cd98f00b204e9800998ecf0abc',
                     '9d41d8cd98f00b204e9800998ecf0abc',
                     {'ts_data': Timestamp(1380144470.00000)})
             else:
@@ -1001,7 +977,7 @@ class TestSender(BaseTest):
                 ':MISSING_CHECK: START\r\n'
                 '0123abc d extra response parts\r\n'
                 ':MISSING_CHECK: END\r\n'))
-        self.sender.daemon._diskfile_mgr.yield_hashes = yield_hashes
+        self.sender.df_mgr.yield_hashes = yield_hashes
         self.sender.missing_check()
         self.assertEqual(self.sender.send_map,
                          {'0123abc': {'data': True}})
@@ -1307,7 +1283,7 @@ class TestSender(BaseTest):
         self.assertEqual(path, '/a/c/o')
         self.assertTrue(isinstance(df, diskfile.DiskFile))
         self.assertEqual(expected, df.get_metadata())
-        self.assertEqual(os.path.join(self.testdir, 'dev/objects/9/',
+        self.assertEqual(os.path.join(self.tx_testdir, 'dev/objects/9/',
                                       object_hash[-3:], object_hash),
                          df._datadir)
 
@@ -1476,62 +1452,86 @@ class TestSender(BaseTest):
             exc = err
         self.assertEqual(str(exc), '0.01 seconds: send_put chunk')
 
-    def test_send_put(self):
+    def _check_send_put(self, obj_name, meta_value):
         ts_iter = make_timestamp_iter()
         t1 = next(ts_iter)
         body = 'test'
-        extra_metadata = {'Some-Other-Header': 'value'}
-        df = self._make_open_diskfile(body=body, timestamp=t1,
+        extra_metadata = {'Some-Other-Header': 'value',
+                          u'Unicode-Meta-Name': meta_value}
+        df = self._make_open_diskfile(obj=obj_name, body=body,
+                                      timestamp=t1,
                                       extra_metadata=extra_metadata)
         expected = dict(df.get_metadata())
         expected['body'] = body
         expected['chunk_size'] = len(body)
+        expected['meta'] = meta_value
+        path = six.moves.urllib.parse.quote(expected['name'])
+        expected['path'] = path
+        expected['length'] = format(145 + len(path) + len(meta_value), 'x')
         # .meta file metadata is not included in expected for data only PUT
         t2 = next(ts_iter)
         metadata = {'X-Timestamp': t2.internal, 'X-Object-Meta-Fruit': 'kiwi'}
         df.write_metadata(metadata)
         df.open()
         self.sender.connection = FakeConnection()
-        self.sender.send_put('/a/c/o', df)
+        self.sender.send_put(path, df)
         self.assertEqual(
             ''.join(self.sender.connection.sent),
-            '82\r\n'
-            'PUT /a/c/o\r\n'
+            '%(length)s\r\n'
+            'PUT %(path)s\r\n'
             'Content-Length: %(Content-Length)s\r\n'
             'ETag: %(ETag)s\r\n'
             'Some-Other-Header: value\r\n'
+            'Unicode-Meta-Name: %(meta)s\r\n'
             'X-Timestamp: %(X-Timestamp)s\r\n'
             '\r\n'
             '\r\n'
             '%(chunk_size)s\r\n'
             '%(body)s\r\n' % expected)
 
-    def test_send_post(self):
+    def test_send_put(self):
+        self._check_send_put('o', 'meta')
+
+    def test_send_put_unicode(self):
+        self._check_send_put(
+            'o_with_caract\xc3\xa8res_like_in_french', 'm\xc3\xa8ta')
+
+    def _check_send_post(self, obj_name, meta_value):
         ts_iter = make_timestamp_iter()
         # create .data file
         extra_metadata = {'X-Object-Meta-Foo': 'old_value',
                           'X-Object-Sysmeta-Test': 'test_sysmeta',
                           'Content-Type': 'test_content_type'}
         ts_0 = next(ts_iter)
-        df = self._make_open_diskfile(extra_metadata=extra_metadata,
+        df = self._make_open_diskfile(obj=obj_name,
+                                      extra_metadata=extra_metadata,
                                       timestamp=ts_0)
         # create .meta file
         ts_1 = next(ts_iter)
-        newer_metadata = {'X-Object-Meta-Foo': 'new_value',
+        newer_metadata = {u'X-Object-Meta-Foo': meta_value,
                           'X-Timestamp': ts_1.internal}
         df.write_metadata(newer_metadata)
+        path = six.moves.urllib.parse.quote(df.read_metadata()['name'])
+        length = format(61 + len(path) + len(meta_value), 'x')
 
         self.sender.connection = FakeConnection()
         with df.open():
-            self.sender.send_post('/a/c/o', df)
+            self.sender.send_post(path, df)
         self.assertEqual(
             ''.join(self.sender.connection.sent),
-            '4c\r\n'
-            'POST /a/c/o\r\n'
-            'X-Object-Meta-Foo: new_value\r\n'
+            '%s\r\n'
+            'POST %s\r\n'
+            'X-Object-Meta-Foo: %s\r\n'
             'X-Timestamp: %s\r\n'
             '\r\n'
-            '\r\n' % ts_1.internal)
+            '\r\n' % (length, path, meta_value, ts_1.internal))
+
+    def test_send_post(self):
+        self._check_send_post('o', 'meta')
+
+    def test_send_post_unicode(self):
+        self._check_send_post(
+            'o_with_caract\xc3\xa8res_like_in_french', 'm\xc3\xa8ta')
 
     def test_disconnect_timeout(self):
         self.sender.connection = FakeConnection()

@@ -65,6 +65,7 @@ class NamedConfigLoader(loadwsgi.ConfigLoader):
         context = super(NamedConfigLoader, self).get_context(
             object_type, name=name, global_conf=global_conf)
         context.name = name
+        context.local_conf['__name__'] = name
         return context
 
 
@@ -114,7 +115,7 @@ class ConfigString(NamedConfigLoader):
         self.filename = "string"
         defaults = {
             'here': "string",
-            '__file__': "string",
+            '__file__': self.contents,
         }
         self.parser = loadwsgi.NicerConfigParser("string", defaults=defaults)
         self.parser.optionxform = str  # Don't lower-case keys
@@ -398,10 +399,9 @@ def loadapp(conf_file, global_conf=None, allow_modify_pipeline=True):
 
 def run_server(conf, logger, sock, global_conf=None):
     # Ensure TZ environment variable exists to avoid stat('/etc/localtime') on
-    # some platforms. This locks in reported times to the timezone in which
-    # the server first starts running in locations that periodically change
-    # timezones.
-    os.environ['TZ'] = time.strftime("%z", time.gmtime())
+    # some platforms. This locks in reported times to UTC.
+    os.environ['TZ'] = 'UTC+0'
+    time.tzset()
 
     wsgi.HttpProtocol.default_request_version = "HTTP/1.0"
     # Turn off logging requests by the underlying WSGI software.
@@ -480,7 +480,7 @@ class WorkersStrategy(object):
 
         return 0.5
 
-    def bind_ports(self):
+    def do_bind_ports(self):
         """
         Bind the one listen socket for this strategy and drop privileges
         (since the parent process will never need to bind again).
@@ -648,10 +648,7 @@ class PortPidState(object):
         Yield all current listen sockets.
         """
 
-        # Use six.itervalues() instead of calling directly the .values() method
-        # on Python 2 to avoid a temporary list, because sock_data_by_port
-        # comes from users and can be large.
-        for orphan_data in six.itervalues(self.sock_data_by_port):
+        for orphan_data in self.sock_data_by_port.values():
             yield orphan_data['sock']
 
     def forget_port(self, port):
@@ -734,7 +731,7 @@ class ServersPerPortStrategy(object):
 
         return self.ring_check_interval
 
-    def bind_ports(self):
+    def do_bind_ports(self):
         """
         Bind one listen socket per unique local storage policy ring port.  Then
         do all the work of drop_privileges except the actual dropping of
@@ -895,12 +892,6 @@ def run_wsgi(conf_path, app_section, *args, **kwargs):
     else:
         strategy = WorkersStrategy(conf, logger)
 
-    error_msg = strategy.bind_ports()
-    if error_msg:
-        logger.error(error_msg)
-        print(error_msg)
-        return 1
-
     # Ensure the configuration and application can be loaded before proceeding.
     global_conf = {'log_name': log_name}
     if 'global_conf_callback' in kwargs:
@@ -911,7 +902,15 @@ def run_wsgi(conf_path, app_section, *args, **kwargs):
     utils.FALLOCATE_RESERVE, utils.FALLOCATE_IS_PERCENT = \
         utils.config_fallocate_value(conf.get('fallocate_reserve', '1%'))
 
-    # redirect errors to logger and close stdio
+    # Start listening on bind_addr/port
+    error_msg = strategy.do_bind_ports()
+    if error_msg:
+        logger.error(error_msg)
+        print(error_msg)
+        return 1
+
+    # Redirect errors to logger and close stdio. Do this *after* binding ports;
+    # we use this to signal that the service is ready to accept connections.
     capture_stdio(logger)
 
     no_fork_sock = strategy.no_fork_sock()
@@ -1079,6 +1078,12 @@ class WSGIContext(object):
             if h_key.lower() == key.lower():
                 return val
         return None
+
+    def update_content_length(self, new_total_len):
+        self._response_headers = [
+            (h, v) for h, v in self._response_headers
+            if h.lower() != 'content-length']
+        self._response_headers.append(('Content-Length', str(new_total_len)))
 
 
 def make_env(env, method=None, path=None, agent='Swift', query_string=None,

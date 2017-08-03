@@ -80,7 +80,7 @@ class Sender(object):
 
     def __init__(self, daemon, node, job, suffixes, remote_check_objs=None):
         self.daemon = daemon
-        self.df_mgr = self.daemon._diskfile_mgr
+        self.df_mgr = self.daemon._df_router[job['policy']]
         self.node = node
         self.job = job
         self.suffixes = suffixes
@@ -271,10 +271,10 @@ class Sender(object):
             frag_index=self.job.get('frag_index'))
         if self.remote_check_objs is not None:
             hash_gen = six.moves.filter(
-                lambda path_objhash_timestamps:
-                path_objhash_timestamps[1] in
+                lambda objhash_timestamps:
+                objhash_timestamps[0] in
                 self.remote_check_objs, hash_gen)
-        for path, object_hash, timestamps in hash_gen:
+        for object_hash, timestamps in hash_gen:
             self.available_map[object_hash] = timestamps
             with exceptions.MessageTimeout(
                     self.daemon.node_timeout,

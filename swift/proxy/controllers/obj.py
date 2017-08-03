@@ -24,7 +24,6 @@
 #   These shenanigans are to ensure all related objects can be garbage
 # collected. We've seen objects hang around forever otherwise.
 
-import six
 from six.moves.urllib.parse import unquote
 
 import collections
@@ -65,7 +64,7 @@ from swift.common.http import (
 from swift.common.storage_policy import (POLICIES, REPL_POLICY, EC_POLICY,
                                          ECDriverError, PolicyError)
 from swift.proxy.controllers.base import Controller, delay_denial, \
-    cors_validation, ResumingGetter
+    cors_validation, ResumingGetter, update_headers
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, HTTPClientDisconnect, \
@@ -124,12 +123,13 @@ class BaseObjectController(Controller):
 
     def __init__(self, app, account_name, container_name, object_name,
                  **kwargs):
-        Controller.__init__(self, app)
+        super(BaseObjectController, self).__init__(app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
         self.object_name = unquote(object_name)
 
-    def iter_nodes_local_first(self, ring, partition):
+    def iter_nodes_local_first(self, ring, partition, policy=None,
+                               local_handoffs_first=False):
         """
         Yields nodes for a ring partition.
 
@@ -142,30 +142,49 @@ class BaseObjectController(Controller):
 
         :param ring: ring to get nodes from
         :param partition: ring partition to yield nodes for
+        :param policy: optional, an instance of
+            :class:`~swift.common.storage_policy.BaseStoragePolicy`
+        :param local_handoffs_first: optional, if True prefer primaries and
+            local handoff nodes first before looking elsewhere.
         """
-
-        is_local = self.app.write_affinity_is_local_fn
+        policy_options = self.app.get_policy_options(policy)
+        is_local = policy_options.write_affinity_is_local_fn
         if is_local is None:
-            return self.app.iter_nodes(ring, partition)
+            return self.app.iter_nodes(ring, partition, policy=policy)
 
         primary_nodes = ring.get_part_nodes(partition)
-        num_locals = self.app.write_affinity_node_count(len(primary_nodes))
+        handoff_nodes = ring.get_more_nodes(partition)
+        all_nodes = itertools.chain(primary_nodes, handoff_nodes)
 
-        all_nodes = itertools.chain(primary_nodes,
-                                    ring.get_more_nodes(partition))
-        first_n_local_nodes = list(itertools.islice(
-            six.moves.filter(is_local, all_nodes), num_locals))
+        if local_handoffs_first:
+            num_locals = policy_options.write_affinity_handoff_delete_count
+            if num_locals is None:
+                local_primaries = [node for node in primary_nodes
+                                   if is_local(node)]
+                num_locals = len(primary_nodes) - len(local_primaries)
 
-        # refresh it; it moved when we computed first_n_local_nodes
-        all_nodes = itertools.chain(primary_nodes,
-                                    ring.get_more_nodes(partition))
-        local_first_node_iter = itertools.chain(
-            first_n_local_nodes,
-            six.moves.filter(lambda node: node not in first_n_local_nodes,
-                             all_nodes))
+            first_local_handoffs = list(itertools.islice(
+                (node for node in handoff_nodes if is_local(node)), num_locals)
+            )
+            preferred_nodes = primary_nodes + first_local_handoffs
+        else:
+            num_locals = policy_options.write_affinity_node_count_fn(
+                len(primary_nodes)
+            )
+            preferred_nodes = list(itertools.islice(
+                (node for node in all_nodes if is_local(node)), num_locals)
+            )
+            # refresh it; it moved when we computed preferred_nodes
+            handoff_nodes = ring.get_more_nodes(partition)
+            all_nodes = itertools.chain(primary_nodes, handoff_nodes)
 
-        return self.app.iter_nodes(
-            ring, partition, node_iter=local_first_node_iter)
+        node_iter = itertools.chain(
+            preferred_nodes,
+            (node for node in all_nodes if node not in preferred_nodes)
+        )
+
+        return self.app.iter_nodes(ring, partition, node_iter=node_iter,
+                                   policy=policy)
 
     def GETorHEAD(self, req):
         """Handle HTTP GET or HEAD requests."""
@@ -184,7 +203,7 @@ class BaseObjectController(Controller):
                 return aresp
         partition = obj_ring.get_part(
             self.account_name, self.container_name, self.object_name)
-        node_iter = self.app.iter_nodes(obj_ring, partition)
+        node_iter = self.app.iter_nodes(obj_ring, partition, policy=policy)
 
         resp = self._get_or_head_response(req, node_iter, partition, policy)
 
@@ -235,10 +254,13 @@ class BaseObjectController(Controller):
                                        container_info['storage_policy'])
         obj_ring = self.app.get_object_ring(policy_index)
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
+        next_part_power = getattr(obj_ring, 'next_part_power', None)
+        if next_part_power:
+            req.headers['X-Backend-Next-Part-Power'] = next_part_power
         partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
 
-        req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+        req.headers['X-Timestamp'] = Timestamp.now().internal
 
         headers = self._backend_requests(
             req, len(nodes), container_partition, container_nodes,
@@ -445,7 +467,7 @@ class BaseObjectController(Controller):
                          'was %r' % req.headers['x-timestamp'])
             req.headers['X-Timestamp'] = req_timestamp.internal
         else:
-            req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+            req.headers['X-Timestamp'] = Timestamp.now().internal
         return None
 
     def _check_failure_put_connections(self, putters, req, min_conns):
@@ -541,7 +563,7 @@ class BaseObjectController(Controller):
         """
         obj_ring = policy.object_ring
         node_iter = GreenthreadSafeIterator(
-            self.iter_nodes_local_first(obj_ring, partition))
+            self.iter_nodes_local_first(obj_ring, partition, policy=policy))
         pile = GreenPile(len(nodes))
 
         for nheaders in outgoing_headers:
@@ -590,10 +612,12 @@ class BaseObjectController(Controller):
         raise NotImplementedError()
 
     def _delete_object(self, req, obj_ring, partition, headers):
-        """
-        send object DELETE request to storage nodes. Subclasses of
-        the BaseObjectController can provide their own implementation
-        of this method.
+        """Delete object considering write-affinity.
+
+        When deleting object in write affinity deployment, also take configured
+        handoff nodes number into consideration, instead of just sending
+        requests to primary nodes. Otherwise (write-affinity is disabled),
+        go with the same way as before.
 
         :param req: the DELETE Request
         :param obj_ring: the object ring
@@ -601,11 +625,37 @@ class BaseObjectController(Controller):
         :param headers: system headers to storage nodes
         :return: Response object
         """
-        # When deleting objects treat a 404 status as 204.
+        policy_index = req.headers.get('X-Backend-Storage-Policy-Index')
+        policy = POLICIES.get_by_index(policy_index)
+
+        node_count = None
+        node_iterator = None
+
+        policy_options = self.app.get_policy_options(policy)
+        is_local = policy_options.write_affinity_is_local_fn
+        if is_local is not None:
+            primaries = obj_ring.get_part_nodes(partition)
+            node_count = len(primaries)
+
+            local_handoffs = policy_options.write_affinity_handoff_delete_count
+            if local_handoffs is None:
+                local_primaries = [node for node in primaries
+                                   if is_local(node)]
+                local_handoffs = len(primaries) - len(local_primaries)
+
+            node_count += local_handoffs
+
+            node_iterator = self.iter_nodes_local_first(
+                obj_ring, partition, policy=policy, local_handoffs_first=True
+            )
+
         status_overrides = {404: 204}
         resp = self.make_requests(req, obj_ring,
                                   partition, 'DELETE', req.swift_entity_path,
-                                  headers, overrides=status_overrides)
+                                  headers, overrides=status_overrides,
+                                  node_count=node_count,
+                                  node_iterator=node_iterator)
+
         return resp
 
     def _post_object(self, req, obj_ring, partition, headers):
@@ -643,6 +693,9 @@ class BaseObjectController(Controller):
 
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
+        next_part_power = getattr(obj_ring, 'next_part_power', None)
+        if next_part_power:
+            req.headers['X-Backend-Next-Part-Power'] = next_part_power
         req.acl = container_info['write_acl']
         req.environ['swift_sync_key'] = container_info['sync_key']
 
@@ -701,6 +754,9 @@ class BaseObjectController(Controller):
         obj_ring = self.app.get_object_ring(policy_index)
         # pass the policy index to storage nodes via req header
         req.headers['X-Backend-Storage-Policy-Index'] = policy_index
+        next_part_power = getattr(obj_ring, 'next_part_power', None)
+        if next_part_power:
+            req.headers['X-Backend-Next-Part-Power'] = next_part_power
         container_partition = container_info['partition']
         container_nodes = container_info['nodes']
         req.acl = container_info['write_acl']
@@ -724,10 +780,22 @@ class BaseObjectController(Controller):
                          'was %r' % req.headers['x-timestamp'])
             req.headers['X-Timestamp'] = req_timestamp.internal
         else:
-            req.headers['X-Timestamp'] = Timestamp(time.time()).internal
+            req.headers['X-Timestamp'] = Timestamp.now().internal
+
+        # Include local handoff nodes if write-affinity is enabled.
+        node_count = len(nodes)
+        policy = POLICIES.get_by_index(policy_index)
+        policy_options = self.app.get_policy_options(policy)
+        is_local = policy_options.write_affinity_is_local_fn
+        if is_local is not None:
+            local_handoffs = policy_options.write_affinity_handoff_delete_count
+            if local_handoffs is None:
+                local_primaries = [node for node in nodes if is_local(node)]
+                local_handoffs = len(nodes) - len(local_primaries)
+            node_count += local_handoffs
 
         headers = self._backend_requests(
-            req, len(nodes), container_partition, container_nodes)
+            req, node_count, container_partition, container_nodes)
         return self._delete_object(req, obj_ring, partition, headers)
 
 
@@ -951,7 +1019,7 @@ class ECAppIter(object):
         can also use it in the body.
 
         :returns: None
-        :raises: HTTPException on error
+        :raises HTTPException: on error
         """
         self.mime_boundary = resp.boundary
 
@@ -1469,7 +1537,7 @@ class Putter(object):
         :param informational: if True then try to get a 100-continue response,
                               otherwise try to get a final response.
         :returns: HTTPResponse
-        :raises: Timeout if the response took too long
+        :raises Timeout: if the response took too long
         """
         # don't do this update of self.resp if the Expect response during
         # connect() was actually a final response
@@ -1588,10 +1656,10 @@ class Putter(object):
 
         :returns: Putter instance
 
-        :raises: ConnectionTimeout if initial connection timed out
-        :raises: ResponseTimeout if header retrieval timed out
-        :raises: InsufficientStorage on 507 response from node
-        :raises: PutterConnectError on non-507 server error response from node
+        :raises ConnectionTimeout: if initial connection timed out
+        :raises ResponseTimeout: if header retrieval timed out
+        :raises InsufficientStorage: on 507 response from node
+        :raises PutterConnectError: on non-507 server error response from node
         """
         conn, expect_resp, final_resp, connect_duration = cls._make_connection(
             node, part, path, headers, conn_timeout, node_timeout)
@@ -1701,9 +1769,9 @@ class MIMEPutter(Putter):
 
         :param need_multiphase: if True then multiphase support is required of
                                 the object server
-        :raises: FooterNotSupported if need_metadata_footer is set but
+        :raises FooterNotSupported: if need_metadata_footer is set but
                  backend node can't process footers
-        :raises: MultiphasePUTNotSupported if need_multiphase is set but
+        :raises MultiphasePUTNotSupported: if need_multiphase is set but
                  backend node can't handle multiphase PUT
         """
         mime_boundary = "%.64x" % random.randint(0, 16 ** 64)
@@ -1747,7 +1815,12 @@ class MIMEPutter(Putter):
                    mime_boundary, multiphase=need_multiphase)
 
 
-def chunk_transformer(policy, nstreams):
+def chunk_transformer(policy):
+    """
+    A generator to transform a source chunk to erasure coded chunks for each
+    `send` call. The number of erasure coded chunks is as
+    policy.ec_n_unique_fragments.
+    """
     segment_size = policy.ec_segment_size
 
     buf = collections.deque()
@@ -1803,7 +1876,7 @@ def chunk_transformer(policy, nstreams):
         last_frags = policy.pyeclib_driver.encode(last_bytes)
         yield last_frags
     else:
-        yield [''] * nstreams
+        yield [''] * policy.ec_n_unique_fragments
 
 
 def trailing_metadata(policy, client_obj_hasher,
@@ -1983,7 +2056,7 @@ class ECGetResponseCollection(object):
         # durable. Note that this may be a different bucket than the one this
         # response got added to, and that we may never go and get a durable
         # frag from this node; it is sufficient that we have been told that a
-        # .durable exists, somewhere, at t_durable.
+        # durable frag exists, somewhere, at t_durable.
         t_durable = headers.get('X-Backend-Durable-Timestamp')
         if not t_durable and not t_data_file:
             # obj server not upgraded so assume this response's frag is durable
@@ -2178,6 +2251,7 @@ class ECObjectController(BaseObjectController):
             range_specs = self._convert_range(req, policy)
 
         safe_iter = GreenthreadSafeIterator(node_iter)
+
         # Sending the request concurrently to all nodes, and responding
         # with the first response isn't something useful for EC as all
         # nodes contain different fragments. Also EC has implemented it's
@@ -2204,8 +2278,11 @@ class ECObjectController(BaseObjectController):
             # getters in case some unforeseen scenario, or a misbehaving object
             # server, causes us to otherwise make endless requests e.g. if an
             # object server were to ignore frag_prefs and always respond with
-            # a frag that is already in a bucket.
-            max_extra_requests = 2 * policy.ec_nparity + policy.ec_ndata
+            # a frag that is already in a bucket. Now we're assuming it should
+            # be limit at most 2 * replicas.
+            max_extra_requests = (
+                (policy.object_ring.replica_count * 2) - policy.ec_ndata)
+
             for get, parts_iter in pile:
                 if get.last_status is None:
                     # We may have spawned getters that find the node iterator
@@ -2263,9 +2340,9 @@ class ECObjectController(BaseObjectController):
                 self.app.logger)
             resp = Response(
                 request=req,
-                headers=resp_headers,
                 conditional_response=True,
                 app_iter=app_iter)
+            update_headers(resp, resp_headers)
             try:
                 app_iter.kickoff(req, resp)
             except HTTPException as err_resp:
@@ -2310,6 +2387,9 @@ class ECObjectController(BaseObjectController):
             resp.headers['Content-Length'] = resp.headers.get(
                 'X-Object-Sysmeta-Ec-Content-Length')
             resp.fix_conditional_response()
+        if resp.status_int == HTTP_REQUESTED_RANGE_NOT_SATISFIABLE:
+            resp.headers['Content-Range'] = 'bytes */%s' % resp.headers[
+                'X-Object-Sysmeta-Ec-Content-Length']
 
     def _make_putter(self, node, part, req, headers):
         return MIMEPutter.connect(
@@ -2319,27 +2399,32 @@ class ECObjectController(BaseObjectController):
             logger=self.app.logger,
             need_multiphase=True)
 
-    def _determine_chunk_destinations(self, putters):
+    def _determine_chunk_destinations(self, putters, policy):
         """
         Given a list of putters, return a dict where the key is the putter
-        and the value is the node index to use.
+        and the value is the frag index to use.
 
-        This is done so that we line up handoffs using the same node index
+        This is done so that we line up handoffs using the same frag index
         (in the primary part list) as the primary that the handoff is standing
         in for.  This lets erasure-code fragment archives wind up on the
         preferred local primary nodes when possible.
+
+        :param putters: a list of swift.proxy.controllers.obj.MIMEPutter
+                        instance
+        :param policy: A policy instance which should be one of ECStoragePolicy
         """
-        # Give each putter a "chunk index": the index of the
+        # Give each putter a "frag index": the index of the
         # transformed chunk that we'll send to it.
         #
         # For primary nodes, that's just its index (primary 0 gets
         # chunk 0, primary 1 gets chunk 1, and so on). For handoffs,
         # we assign the chunk index of a missing primary.
         handoff_conns = []
-        chunk_index = {}
+        putter_to_frag_index = {}
         for p in putters:
             if p.node_index is not None:
-                chunk_index[p] = p.node_index
+                putter_to_frag_index[p] = policy.get_backend_index(
+                    p.node_index)
             else:
                 handoff_conns.append(p)
 
@@ -2348,12 +2433,35 @@ class ECObjectController(BaseObjectController):
         # nodes. Holes occur when a storage node is down, in which
         # case the connection is not replaced, and when a storage node
         # returns 507, in which case a handoff is used to replace it.
-        holes = [x for x in range(len(putters))
-                 if x not in chunk_index.values()]
 
+        # lack_list is a dict of list to keep hole indexes
+        # e.g. if we have 2 holes for frag index 0 with ec_duplication_factor=2
+        # lack_list is like {0: [0], 1: [0]}, and then, if 1 hole found
+        # for frag index 1, lack_list will be {0: [0, 1], 1: [0]}.
+        # After that, holes will be filled from bigger key
+        # (i.e. 1:[0] at first)
+
+        # Grouping all missing fragment indexes for each frag_index
+        available_indexes = putter_to_frag_index.values()
+        lack_list = collections.defaultdict(list)
+        for frag_index in range(policy.ec_n_unique_fragments):
+            # Set the missing index to lack_list
+            available_count = available_indexes.count(frag_index)
+            # N.B. it should be duplication_factor >= lack >= 0
+            lack = policy.ec_duplication_factor - available_count
+            # now we are missing one or more nodes to store the frag index
+            for lack_tier in range(lack):
+                lack_list[lack_tier].append(frag_index)
+
+        # Extract the lack_list to a flat list
+        holes = []
+        for lack_tier, indexes in sorted(lack_list.items(), reverse=True):
+            holes.extend(indexes)
+
+        # Fill putter_to_frag_index list with the hole list
         for hole, p in zip(holes, handoff_conns):
-            chunk_index[p] = hole
-        return chunk_index
+            putter_to_frag_index[p] = hole
+        return putter_to_frag_index
 
     def _transfer_data(self, req, policy, data_source, putters, nodes,
                        min_conns, etag_hasher):
@@ -2363,15 +2471,15 @@ class ECObjectController(BaseObjectController):
         This method was added in the PUT method extraction change
         """
         bytes_transferred = 0
-        chunk_transform = chunk_transformer(policy, len(nodes))
+        chunk_transform = chunk_transformer(policy)
         chunk_transform.send(None)
-        chunk_hashers = collections.defaultdict(md5)
+        frag_hashers = collections.defaultdict(md5)
 
         def send_chunk(chunk):
             # Note: there's two different hashers in here. etag_hasher is
             # hashing the original object so that we can validate the ETag
             # that the client sent (and etag_hasher is None if the client
-            # didn't send one). The hasher in chunk_hashers is hashing the
+            # didn't send one). The hasher in frag_hashers is hashing the
             # fragment archive being sent to the client; this lets us guard
             # against data corruption on the network between proxy and
             # object server.
@@ -2383,11 +2491,17 @@ class ECObjectController(BaseObjectController):
                 # or whatever we're doing, the transform will give us None.
                 return
 
+            updated_frag_indexes = set()
             for putter in list(putters):
-                ci = chunk_index[putter]
-                backend_chunk = backend_chunks[ci]
+                frag_index = putter_to_frag_index[putter]
+                backend_chunk = backend_chunks[frag_index]
                 if not putter.failed:
-                    chunk_hashers[ci].update(backend_chunk)
+                    # N.B. same frag_index will appear when using
+                    # ec_duplication_factor >= 2. So skip to feed the chunk
+                    # to hasher if the frag was updated already.
+                    if frag_index not in updated_frag_indexes:
+                        frag_hashers[frag_index].update(backend_chunk)
+                        updated_frag_indexes.add(frag_index)
                     putter.send_chunk(backend_chunk)
                 else:
                     putter.close()
@@ -2400,9 +2514,10 @@ class ECObjectController(BaseObjectController):
         try:
             with ContextPool(len(putters)) as pool:
 
-                # build our chunk index dict to place handoffs in the
+                # build our putter_to_frag_index dict to place handoffs in the
                 # same part nodes index as the primaries they are covering
-                chunk_index = self._determine_chunk_destinations(putters)
+                putter_to_frag_index = self._determine_chunk_destinations(
+                    putters, policy)
 
                 for putter in putters:
                     putter.spawn_sender_greenthread(
@@ -2449,14 +2564,14 @@ class ECObjectController(BaseObjectController):
                 footers = {(k, v) for k, v in footers.items()
                            if not k.lower().startswith('x-object-sysmeta-ec-')}
                 for putter in putters:
-                    ci = chunk_index[putter]
+                    frag_index = putter_to_frag_index[putter]
                     # Update any footers set by middleware with EC footers
                     trail_md = trailing_metadata(
                         policy, etag_hasher,
-                        bytes_transferred, ci)
+                        bytes_transferred, frag_index)
                     trail_md.update(footers)
                     # Etag footer must always be hash of what we sent
-                    trail_md['Etag'] = chunk_hashers[ci].hexdigest()
+                    trail_md['Etag'] = frag_hashers[frag_index].hexdigest()
                     putter.end_of_object_data(footer_metadata=trail_md)
 
                 for putter in putters:
@@ -2619,8 +2734,9 @@ class ECObjectController(BaseObjectController):
 
             self._transfer_data(req, policy, data_source, putters,
                                 nodes, min_conns, etag_hasher)
-            # The .durable file will propagate in a replicated fashion; if
-            # one exists, the reconstructor will spread it around.
+            # The durable state will propagate in a replicated fashion; if
+            # one fragment is durable then the reconstructor will spread the
+            # durable status around.
             # In order to avoid successfully writing an object, but refusing
             # to serve it on a subsequent GET because don't have enough
             # durable data fragments - we require the same number of durable

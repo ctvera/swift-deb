@@ -76,7 +76,7 @@ class Test(ReplProbeTest):
                                            self.object_name, i)
             if info_i:
                 obj_info.append(info_i)
-        self.assertTrue(len(obj_info) > 1)
+        self.assertGreater(len(obj_info), 1)
         for other in obj_info[1:]:
             self.assertDictEqual(obj_info[0], other)
 
@@ -121,7 +121,7 @@ class Test(ReplProbeTest):
             info_i = self._get_db_info(self.account, self.container_name, i)
             if info_i:
                 db_info.append(info_i)
-        self.assertTrue(len(db_info) > 1)
+        self.assertGreater(len(db_info), 1)
         for other in db_info[1:]:
             self.assertEqual(db_info[0]['hash'], other['hash'],
                              'Container db hash mismatch: %s != %s'
@@ -175,7 +175,7 @@ class Test(ReplProbeTest):
                              'Inconsistent suffix hashes found: %s' % results)
 
     def test_object_delete_is_replicated(self):
-        self.brain.put_container(policy_index=int(self.policy))
+        self.brain.put_container()
         # put object
         self._put_object()
 
@@ -229,7 +229,7 @@ class Test(ReplProbeTest):
         self._get_object()
 
     def test_object_after_replication_with_subsequent_post(self):
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         # put object
         self._put_object(headers={'Content-Type': 'foo'}, body=u'older')
@@ -267,7 +267,7 @@ class Test(ReplProbeTest):
         sysmeta = {'x-object-sysmeta-foo': 'older'}
         sysmeta2 = {'x-object-sysmeta-foo': 'newer'}
         usermeta = {'x-object-meta-bar': 'meta-bar'}
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         # put object with sysmeta to first server subset
         self.brain.stop_primary_half()
@@ -275,7 +275,7 @@ class Test(ReplProbeTest):
         self._put_object(headers=sysmeta)
         metadata = self._get_object_metadata()
         for key in sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta[key])
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
@@ -286,15 +286,15 @@ class Test(ReplProbeTest):
         self._put_object(headers=sysmeta2)
         metadata = self._get_object_metadata()
         for key in sysmeta2:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta2[key])
         self._post_object(usermeta)
         metadata = self._get_object_metadata()
         for key in usermeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], usermeta[key])
         for key in sysmeta2:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta2[key])
 
         self.brain.start_handoff_half()
@@ -308,10 +308,10 @@ class Test(ReplProbeTest):
         self.container_brain.stop_primary_half()
         metadata = self._get_object_metadata()
         for key in usermeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], usermeta[key])
         for key in sysmeta2.keys():
-            self.assertTrue(key in metadata, key)
+            self.assertIn(key, metadata, key)
             self.assertEqual(metadata[key], sysmeta2[key])
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
@@ -321,10 +321,10 @@ class Test(ReplProbeTest):
         self.container_brain.stop_handoff_half()
         metadata = self._get_object_metadata()
         for key in usermeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], usermeta[key])
         for key in sysmeta2.keys():
-            self.assertTrue(key in metadata, key)
+            self.assertIn(key, metadata, key)
             self.assertEqual(metadata[key], sysmeta2[key])
         self.brain.start_handoff_half()
         self.container_brain.start_handoff_half()
@@ -338,7 +338,7 @@ class Test(ReplProbeTest):
         usermeta = {'x-object-meta-bar': 'meta-bar'}
         transient_sysmeta = {
             'x-object-transient-sysmeta-bar': 'transient-sysmeta-bar'}
-        self.brain.put_container(policy_index=int(self.policy))
+        self.brain.put_container()
         # put object
         self._put_object()
         # put newer object with sysmeta to first server subset
@@ -347,7 +347,7 @@ class Test(ReplProbeTest):
         self._put_object(headers=sysmeta)
         metadata = self._get_object_metadata()
         for key in sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta[key])
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
@@ -360,10 +360,10 @@ class Test(ReplProbeTest):
         self._post_object(user_and_transient_sysmeta)
         metadata = self._get_object_metadata()
         for key in user_and_transient_sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], user_and_transient_sysmeta[key])
         for key in sysmeta:
-            self.assertFalse(key in metadata)
+            self.assertNotIn(key, metadata)
         self.brain.start_handoff_half()
         self.container_brain.start_handoff_half()
 
@@ -379,7 +379,7 @@ class Test(ReplProbeTest):
         expected.update(usermeta)
         expected.update(transient_sysmeta)
         for key in expected.keys():
-            self.assertTrue(key in metadata, key)
+            self.assertIn(key, metadata, key)
             self.assertEqual(metadata[key], expected[key])
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
@@ -389,7 +389,7 @@ class Test(ReplProbeTest):
         self.container_brain.stop_handoff_half()
         metadata = self._get_object_metadata()
         for key in expected.keys():
-            self.assertTrue(key in metadata, key)
+            self.assertIn(key, metadata, key)
             self.assertEqual(metadata[key], expected[key])
         self.brain.start_handoff_half()
         self.container_brain.start_handoff_half()
@@ -403,7 +403,7 @@ class Test(ReplProbeTest):
         usermeta = {'x-object-meta-bar': 'meta-bar'}
         transient_sysmeta = {
             'x-object-transient-sysmeta-bar': 'transient-sysmeta-bar'}
-        self.brain.put_container(policy_index=int(self.policy))
+        self.brain.put_container()
         # put object
         self._put_object()
 
@@ -415,7 +415,7 @@ class Test(ReplProbeTest):
         self._post_object(user_and_transient_sysmeta)
         metadata = self._get_object_metadata()
         for key in user_and_transient_sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], user_and_transient_sysmeta[key])
         self.brain.start_handoff_half()
         self.container_brain.start_handoff_half()
@@ -426,7 +426,7 @@ class Test(ReplProbeTest):
         self._put_object(headers=sysmeta)
         metadata = self._get_object_metadata()
         for key in sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta[key])
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
@@ -440,10 +440,10 @@ class Test(ReplProbeTest):
         self.container_brain.stop_primary_half()
         metadata = self._get_object_metadata()
         for key in sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta[key])
         for key in user_and_transient_sysmeta:
-            self.assertFalse(key in metadata)
+            self.assertNotIn(key, metadata)
         self.brain.start_primary_half()
         self.container_brain.start_primary_half()
 
@@ -453,10 +453,10 @@ class Test(ReplProbeTest):
         self.container_brain.stop_handoff_half()
         metadata = self._get_object_metadata()
         for key in sysmeta:
-            self.assertTrue(key in metadata)
+            self.assertIn(key, metadata)
             self.assertEqual(metadata[key], sysmeta[key])
         for key in user_and_transient_sysmeta:
-            self.assertFalse(key in metadata)
+            self.assertNotIn(key, metadata)
         self.brain.start_handoff_half()
         self.container_brain.start_handoff_half()
 
@@ -475,7 +475,7 @@ class Test(ReplProbeTest):
         #
         #               t1.data:
         #               t2.meta: ctype = baz
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         # incomplete write to primary half
         self.brain.stop_handoff_half()
@@ -530,7 +530,7 @@ class Test(ReplProbeTest):
         #
         #               t1.data: ctype = bar
         #               t2.meta:
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         # incomplete write
         self.brain.stop_handoff_half()
@@ -590,7 +590,7 @@ class Test(ReplProbeTest):
         #
         #               t1.data:
         #               t4-delta.meta: ctype = baz, color = Blue
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         # incomplete write
         self.brain.stop_handoff_half()
@@ -661,7 +661,7 @@ class Test(ReplProbeTest):
         #
         #               t1.data: ctype = bar
         #               t3.meta
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
 
         self._put_object(headers={'Content-Type': 'foo',
                                   'X-Object-Sysmeta-Test': 'older'})
@@ -715,7 +715,7 @@ class Test(ReplProbeTest):
         # newer metadata posted to subset of nodes should persist after an
         # earlier put on other nodes, but older content-type on that subset
         # should not persist
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
         # incomplete put to handoff
         self.brain.stop_primary_half()
         self.container_brain.stop_primary_half()
@@ -787,7 +787,7 @@ class Test(ReplProbeTest):
         # new metadata and content-type posted to subset of nodes should not
         # cause object to persist after replication of an earlier delete on
         # other nodes.
-        self.brain.put_container(policy_index=0)
+        self.brain.put_container()
         # incomplete put
         self.brain.stop_primary_half()
         self.container_brain.stop_primary_half()

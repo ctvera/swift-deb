@@ -204,14 +204,14 @@ class TestAuth(unittest.TestCase):
                                  environ={'swift.authorize_override': True})
         resp = req.get_response(self.test_auth)
         self.assertEqual(resp.status_int, 404)
-        self.assertTrue('swift.authorize' not in req.environ)
+        self.assertNotIn('swift.authorize', req.environ)
 
     def test_override_default_allowed(self):
         req = self._make_request('/v1/AUTH_account',
                                  environ={'swift.authorize_override': True})
         resp = req.get_response(self.test_auth)
         self.assertEqual(resp.status_int, 404)
-        self.assertTrue('swift.authorize' not in req.environ)
+        self.assertNotIn('swift.authorize', req.environ)
 
     def test_auth_deny_non_reseller_prefix(self):
         req = self._make_request('/v1/BLAH_account',
@@ -268,16 +268,19 @@ class TestAuth(unittest.TestCase):
     def test_auth_with_s3_authorization(self):
         local_app = FakeApp()
         local_auth = auth.filter_factory(
-            {'user_s3_s3': 's3 .admin'})(local_app)
-        req = self._make_request('/v1/AUTH_s3',
-                                 headers={'X-Auth-Token': 't',
-                                          'AUTHORIZATION': 'AWS s3:s3:pass'})
+            {'user_s3_s3': 'secret .admin'})(local_app)
+        req = self._make_request('/v1/AUTH_s3', environ={
+            'swift3.auth_details': {
+                'access_key': 's3:s3',
+                'signature': b64encode('sig'),
+                'string_to_sign': 't'}})
 
-        with mock.patch('base64.urlsafe_b64decode') as msg, \
-                mock.patch('base64.encodestring') as sign:
-            msg.return_value = ''
-            sign.return_value = 'pass'
+        with mock.patch('hmac.new') as hmac:
+            hmac.return_value.digest.return_value = 'sig'
             resp = req.get_response(local_auth)
+            self.assertEqual(hmac.mock_calls, [
+                mock.call('secret', 't', mock.ANY),
+                mock.call().digest()])
 
         self.assertEqual(resp.status_int, 404)
         self.assertEqual(local_app.calls, 1)
@@ -327,7 +330,7 @@ class TestAuth(unittest.TestCase):
     def test_authorize_account_access(self):
         req = self._make_request('/v1/AUTH_cfa')
         req.remote_user = 'act:usr,act,AUTH_cfa'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa')
         req.remote_user = 'act:usr,act'
         resp = self.test_auth.authorize(req)
@@ -343,11 +346,11 @@ class TestAuth(unittest.TestCase):
         req = self._make_request('/v1/AUTH_cfa')
         req.remote_user = 'act:usr,act'
         req.acl = 'act'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa')
         req.remote_user = 'act:usr,act'
         req.acl = 'act:usr'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa')
         req.remote_user = 'act:usr,act'
         req.acl = 'act2'
@@ -371,7 +374,7 @@ class TestAuth(unittest.TestCase):
         req = self._make_request('/v1/AUTH_cfa/c')
         req.remote_user = 'act:usr'
         req.acl = '.r:*,act:usr'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
 
     def test_authorize_acl_referrer_access(self):
         self.test_auth = auth.filter_factory({})(
@@ -383,7 +386,7 @@ class TestAuth(unittest.TestCase):
         req = self._make_request('/v1/AUTH_cfa/c')
         req.remote_user = 'act:usr,act'
         req.acl = '.r:*,.rlistings'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa/c')
         req.remote_user = 'act:usr,act'
         req.acl = '.r:*'  # No listings allowed
@@ -398,7 +401,7 @@ class TestAuth(unittest.TestCase):
         req.remote_user = 'act:usr,act'
         req.referer = 'http://www.example.com/index.html'
         req.acl = '.r:.example.com,.rlistings'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa/c')
         resp = self.test_auth.authorize(req)
         self.assertEqual(resp.status_int, 401)
@@ -406,7 +409,7 @@ class TestAuth(unittest.TestCase):
                          'Swift realm="AUTH_cfa"')
         req = self._make_request('/v1/AUTH_cfa/c')
         req.acl = '.r:*,.rlistings'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
         req = self._make_request('/v1/AUTH_cfa/c')
         req.acl = '.r:*'  # No listings allowed
         resp = self.test_auth.authorize(req)
@@ -422,7 +425,7 @@ class TestAuth(unittest.TestCase):
         req = self._make_request('/v1/AUTH_cfa/c')
         req.referer = 'http://www.example.com/index.html'
         req.acl = '.r:.example.com,.rlistings'
-        self.assertEqual(self.test_auth.authorize(req), None)
+        self.assertIsNone(self.test_auth.authorize(req))
 
     def test_detect_reseller_request(self):
         req = self._make_request('/v1/AUTH_admin',
@@ -459,7 +462,7 @@ class TestAuth(unittest.TestCase):
                                  environ={'REQUEST_METHOD': 'PUT'})
         req.remote_user = 'act:usr,act,.reseller_admin'
         resp = self.test_auth.authorize(req)
-        self.assertEqual(resp, None)
+        self.assertIsNone(resp)
 
         # .super_admin is not something the middleware should ever see or care
         # about
@@ -495,7 +498,7 @@ class TestAuth(unittest.TestCase):
                                  environ={'REQUEST_METHOD': 'DELETE'})
         req.remote_user = 'act:usr,act,.reseller_admin'
         resp = self.test_auth.authorize(req)
-        self.assertEqual(resp, None)
+        self.assertIsNone(resp)
 
         # .super_admin is not something the middleware should ever see or care
         # about
@@ -851,7 +854,7 @@ class TestAuth(unittest.TestCase):
         req = self._make_request('/v1/AUTH_cfa/c/o',
                                  environ={'REQUEST_METHOD': 'OPTIONS'})
         resp = self.test_auth.authorize(req)
-        self.assertEqual(resp, None)
+        self.assertIsNone(resp)
 
     def test_get_user_group(self):
         # More tests in TestGetUserGroups class
@@ -1364,16 +1367,14 @@ class PrefixAccount(unittest.TestCase):
         test_auth = auth.filter_factory(conf)(FakeApp())
         self.assertEqual(test_auth._get_account_prefix(
                          'AUTH_1234'), 'AUTH_')
-        self.assertEqual(test_auth._get_account_prefix(
-                         'JUNK_1234'), None)
+        self.assertIsNone(test_auth._get_account_prefix('JUNK_1234'))
 
     def test_same_as_default(self):
         conf = {'reseller_prefix': 'AUTH'}
         test_auth = auth.filter_factory(conf)(FakeApp())
         self.assertEqual(test_auth._get_account_prefix(
                          'AUTH_1234'), 'AUTH_')
-        self.assertEqual(test_auth._get_account_prefix(
-                         'JUNK_1234'), None)
+        self.assertIsNone(test_auth._get_account_prefix('JUNK_1234'))
 
     def test_blank_reseller(self):
         conf = {'reseller_prefix': ''}
@@ -1388,8 +1389,7 @@ class PrefixAccount(unittest.TestCase):
         test_auth = auth.filter_factory(conf)(FakeApp())
         self.assertEqual(test_auth._get_account_prefix(
                          'AUTH_1234'), 'AUTH_')
-        self.assertEqual(test_auth._get_account_prefix(
-                         'JUNK_1234'), None)
+        self.assertIsNone(test_auth._get_account_prefix('JUNK_1234'))
 
 
 class ServiceTokenFunctionality(unittest.TestCase):

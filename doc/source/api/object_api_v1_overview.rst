@@ -6,9 +6,7 @@ consistent object/blob store. You create, modify, and get objects and
 metadata by using the Object Storage API, which is implemented as a set
 of Representational State Transfer (REST) web services.
 
-For an introduction to OpenStack Object Storage, see `Object
-Storage <http://docs.openstack.org/admin-guide/objectstorage.html>`
-in the *OpenStack Administrator Guide*.
+For an introduction to OpenStack Object Storage, see the :doc:`/admin/index`.
 
 You use the HTTPS (SSL) protocol to interact with Object Storage, and
 you use standard HTTP calls to perform API operations. You can also use
@@ -126,10 +124,10 @@ path.
 
 If you have a large number of containers or objects, you can use query
 parameters to page through large lists of containers or objects. Use the
-*``marker``*, *``limit``*, and *``end_marker``* query parameters to
+``marker``, ``limit``, and ``end_marker`` query parameters to
 control how many items are returned in a list and where the list starts
 or ends. If you want to page through in reverse order, you can use the query
-parameter *``reverse``*, noting that your marker and end_markers should be
+parameter ``reverse``, noting that your marker and end_markers should be
 switched when applied to a reverse listing. I.e, for a list of objects
 ``[a, b, c, d, e]`` the non-reversed could be:
 

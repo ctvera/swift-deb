@@ -79,8 +79,9 @@ def update_headers(response, headers):
     for name, value in headers:
         if name == 'etag':
             response.headers[name] = value.replace('"', '')
-        elif name not in ('date', 'content-length', 'content-type',
-                          'connection', 'x-put-timestamp', 'x-delete-after'):
+        elif name.lower() not in (
+                'date', 'content-length', 'content-type',
+                'connection', 'x-put-timestamp', 'x-delete-after'):
             response.headers[name] = value
 
 
@@ -182,7 +183,7 @@ def headers_to_object_info(headers, status_int=HTTP_OK):
     """
     headers, meta, sysmeta = _prep_headers_to_info(headers, 'object')
     transient_sysmeta = {}
-    for key, val in headers.iteritems():
+    for key, val in six.iteritems(headers):
         if is_object_transient_sysmeta(key):
             key = strip_object_transient_sysmeta_prefix(key.lower())
             transient_sysmeta[key] = val
@@ -232,6 +233,7 @@ def cors_validation(func):
             #  - simple response headers,
             #    http://www.w3.org/TR/cors/#simple-response-header
             #  - swift specific: etag, x-timestamp, x-trans-id
+            #  - headers provided by the operator in cors_expose_headers
             #  - user metadata headers
             #  - headers provided by the user in
             #    x-container-meta-access-control-expose-headers
@@ -239,7 +241,8 @@ def cors_validation(func):
                 expose_headers = set([
                     'cache-control', 'content-language', 'content-type',
                     'expires', 'last-modified', 'pragma', 'etag',
-                    'x-timestamp', 'x-trans-id'])
+                    'x-timestamp', 'x-trans-id', 'x-openstack-request-id'])
+                expose_headers.update(controller.app.cors_expose_headers)
                 for header in resp.headers:
                     if header.startswith('X-Container-Meta') or \
                             header.startswith('X-Object-Meta'):
@@ -349,11 +352,10 @@ def get_container_info(env, app, swift_source=None):
 
     # Old data format in memcache immediately after a Swift upgrade; clean
     # it up so consumers of get_container_info() aren't exposed to it.
-    info.setdefault('storage_policy', '0')
     if 'object_count' not in info and 'container_size' in info:
         info['object_count'] = info.pop('container_size')
 
-    for field in ('bytes', 'object_count'):
+    for field in ('storage_policy', 'bytes', 'object_count'):
         if info.get(field) is None:
             info[field] = 0
         else:
@@ -504,9 +506,10 @@ def set_object_info_cache(app, env, account, container, obj, resp):
     per-request cache only.
 
     :param  app: the application object
+    :param env: the environment used by the current request
     :param  account: the unquoted account name
     :param  container: the unquoted container name
-    :param  object: the unquoted object name
+    :param  obj: the unquoted object name
     :param  resp: a GET or HEAD response received from an object server, or
               None if info cache should be cleared
     :returns: the object info
@@ -1303,9 +1306,11 @@ class NodeIter(object):
     :param partition: ring partition to yield nodes for
     :param node_iter: optional iterable of nodes to try. Useful if you
         want to filter or reorder the nodes.
+    :param policy: an instance of :class:`BaseStoragePolicy`. This should be
+        None for an account or container ring.
     """
 
-    def __init__(self, app, ring, partition, node_iter=None):
+    def __init__(self, app, ring, partition, node_iter=None, policy=None):
         self.app = app
         self.ring = ring
         self.partition = partition
@@ -1321,7 +1326,8 @@ class NodeIter(object):
         # Use of list() here forcibly yanks the first N nodes (the primary
         # nodes) from node_iter, so the rest of its values are handoffs.
         self.primary_nodes = self.app.sort_nodes(
-            list(itertools.islice(node_iter, num_primary_nodes)))
+            list(itertools.islice(node_iter, num_primary_nodes)),
+            policy=policy)
         self.handoff_iter = node_iter
         self._node_provider = None
 
@@ -1357,6 +1363,7 @@ class NodeIter(object):
         Install a callback function that will be used during a call to next()
         to get an alternate node instead of returning the next node from the
         iterator.
+
         :param callback: A no argument function that should return a node dict
                          or None.
         """
@@ -1465,7 +1472,7 @@ class Controller(object):
         headers = HeaderKeyDict(additional) if additional else HeaderKeyDict()
         if transfer:
             self.transfer_headers(orig_req.headers, headers)
-        headers.setdefault('x-timestamp', Timestamp(time.time()).internal)
+        headers.setdefault('x-timestamp', Timestamp.now().internal)
         if orig_req:
             referer = orig_req.as_referer()
         else:
@@ -1499,10 +1506,7 @@ class Controller(object):
                 or not is_success(info['status'])
                 or not info.get('account_really_exists', True)):
             return None, None, None
-        if info.get('container_count') is None:
-            container_count = 0
-        else:
-            container_count = int(info['container_count'])
+        container_count = info['container_count']
         return partition, nodes, container_count
 
     def container_info(self, account, container, req=None):
@@ -1535,8 +1539,6 @@ class Controller(object):
         else:
             info['partition'] = part
             info['nodes'] = nodes
-        if info.get('storage_policy') is None:
-            info['storage_policy'] = 0
         return info
 
     def _make_request(self, nodes, part, method, path, headers, query,
@@ -1594,7 +1596,8 @@ class Controller(object):
                     {'method': method, 'path': path})
 
     def make_requests(self, req, ring, part, method, path, headers,
-                      query_string='', overrides=None):
+                      query_string='', overrides=None, node_count=None,
+                      node_iterator=None):
         """
         Sends an HTTP request to multiple nodes and aggregates the results.
         It attempts the primary nodes concurrently, then iterates over the
@@ -1611,11 +1614,16 @@ class Controller(object):
         :param query_string: optional query string to send to the backend
         :param overrides: optional return status override map used to override
                           the returned status of a request.
+        :param node_count: optional number of nodes to send request to.
+        :param node_iterator: optional node iterator.
         :returns: a swob.Response object
         """
-        start_nodes = ring.get_part_nodes(part)
-        nodes = GreenthreadSafeIterator(self.app.iter_nodes(ring, part))
-        pile = GreenAsyncPile(len(start_nodes))
+        nodes = GreenthreadSafeIterator(
+            node_iterator or self.app.iter_nodes(ring, part)
+        )
+        node_number = node_count or len(ring.get_part_nodes(part))
+        pile = GreenAsyncPile(node_number)
+
         for head in headers:
             pile.spawn(self._make_request, nodes, part, method, path,
                        head, query_string, self.app.logger.thread_locals)
@@ -1626,7 +1634,7 @@ class Controller(object):
                 continue
             response.append(resp)
             statuses.append(resp[0])
-            if self.have_quorum(statuses, len(start_nodes)):
+            if self.have_quorum(statuses, node_number):
                 break
         # give any pending requests *some* chance to finish
         finished_quickly = pile.waitall(self.app.post_quorum_timeout)
@@ -1635,7 +1643,7 @@ class Controller(object):
                 continue
             response.append(resp)
             statuses.append(resp[0])
-        while len(response) < len(start_nodes):
+        while len(response) < node_number:
             response.append((HTTP_SERVICE_UNAVAILABLE, '', '', ''))
         statuses, reasons, resp_headers, bodies = zip(*response)
         return self.best_response(req, statuses, reasons, bodies,
@@ -1772,8 +1780,9 @@ class Controller(object):
         """
         partition, nodes = self.app.account_ring.get_nodes(account)
         path = '/%s' % account
-        headers = {'X-Timestamp': Timestamp(time.time()).internal,
+        headers = {'X-Timestamp': Timestamp.now().internal,
                    'X-Trans-Id': self.trans_id,
+                   'X-Openstack-Request-Id': self.trans_id,
                    'Connection': 'close'}
         # transfer any x-account-sysmeta headers from original request
         # to the autocreate PUT
@@ -1890,28 +1899,37 @@ class Controller(object):
             resp.status = HTTP_UNAUTHORIZED
             return resp
 
-        # Allow all headers requested in the request. The CORS
-        # specification does leave the door open for this, as mentioned in
-        # http://www.w3.org/TR/cors/#resource-preflight-requests
-        # Note: Since the list of headers can be unbounded
-        # simply returning headers can be enough.
-        allow_headers = set()
-        if req.headers.get('Access-Control-Request-Headers'):
-            allow_headers.update(
-                list_from_csv(req.headers['Access-Control-Request-Headers']))
-
         # Populate the response with the CORS preflight headers
         if cors.get('allow_origin') and \
                 cors.get('allow_origin').strip() == '*':
             headers['access-control-allow-origin'] = '*'
         else:
             headers['access-control-allow-origin'] = req_origin_value
+            if 'vary' in headers:
+                headers['vary'] += ', Origin'
+            else:
+                headers['vary'] = 'Origin'
+
         if cors.get('max_age') is not None:
             headers['access-control-max-age'] = cors.get('max_age')
+
         headers['access-control-allow-methods'] = \
             ', '.join(self.allowed_methods)
+
+        # Allow all headers requested in the request. The CORS
+        # specification does leave the door open for this, as mentioned in
+        # http://www.w3.org/TR/cors/#resource-preflight-requests
+        # Note: Since the list of headers can be unbounded
+        # simply returning headers can be enough.
+        allow_headers = set(
+            list_from_csv(req.headers.get('Access-Control-Request-Headers')))
         if allow_headers:
             headers['access-control-allow-headers'] = ', '.join(allow_headers)
+            if 'vary' in headers:
+                headers['vary'] += ', Access-Control-Request-Headers'
+            else:
+                headers['vary'] = 'Access-Control-Request-Headers'
+
         resp.headers = headers
 
         return resp

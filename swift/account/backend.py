@@ -17,7 +17,6 @@ Pluggable Back-end for Account Server
 """
 
 from uuid import uuid4
-import time
 import six.moves.cPickle as pickle
 
 import sqlite3
@@ -154,7 +153,7 @@ class AccountBroker(DatabaseBroker):
         conn.execute('''
             UPDATE account_stat SET account = ?, created_at = ?, id = ?,
                    put_timestamp = ?, status_changed_at = ?
-            ''', (self.account, Timestamp(time.time()).internal, str(uuid4()),
+            ''', (self.account, Timestamp.now().internal, str(uuid4()),
                   put_timestamp, put_timestamp))
 
     def create_policy_stat_table(self, conn):
@@ -379,7 +378,8 @@ class AccountBroker(DatabaseBroker):
         :param delimiter: delimiter for query
         :param reverse: reverse the result order.
 
-        :returns: list of tuples of (name, object_count, bytes_used, 0)
+        :returns: list of tuples of (name, object_count, bytes_used,
+                  put_timestamp, 0)
         """
         delim_force_gte = False
         (marker, end_marker, prefix, delimiter) = utf8encode(
@@ -397,7 +397,7 @@ class AccountBroker(DatabaseBroker):
             results = []
             while len(results) < limit:
                 query = """
-                    SELECT name, object_count, bytes_used, 0
+                    SELECT name, object_count, bytes_used, put_timestamp, 0
                     FROM container
                     WHERE """
                 query_args = []
@@ -459,7 +459,7 @@ class AccountBroker(DatabaseBroker):
                             delim_force_gte = True
                         dir_name = name[:end + 1]
                         if dir_name != orig_marker:
-                            results.append([dir_name, 0, 0, 1])
+                            results.append([dir_name, 0, 0, '0', 1])
                         curs.close()
                         break
                     results.append(row)

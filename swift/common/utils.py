@@ -17,6 +17,7 @@
 
 from __future__ import print_function
 
+import binascii
 import errno
 import fcntl
 import grp
@@ -27,6 +28,7 @@ import operator
 import os
 import pwd
 import re
+import struct
 import sys
 import time
 import uuid
@@ -117,9 +119,11 @@ def NR_ioprio_set():
     """Give __NR_ioprio_set value for your system."""
     architecture = os.uname()[4]
     arch_bits = platform.architecture()[0]
-    # check if supported system, now support only x86_64
+    # check if supported system, now support x86_64 and AArch64
     if architecture == 'x86_64' and arch_bits == '64bit':
         return 251
+    elif architecture == 'aarch64' and arch_bits == '64bit':
+        return 30
     raise OSError("Swift doesn't support ionice priority for %s %s" %
                   (architecture, arch_bits))
 
@@ -181,6 +185,29 @@ class InvalidHashPathConfigError(ValueError):
     def __str__(self):
         return "[swift-hash]: both swift_hash_path_suffix and " \
             "swift_hash_path_prefix are missing from %s" % SWIFT_CONF_FILE
+
+
+def set_swift_dir(swift_dir):
+    """
+    Sets the directory from which swift config files will be read. If the given
+    directory differs from that already set then the swift.conf file in the new
+    directory will be validated and storage policies will be reloaded from the
+    new swift.conf file.
+
+    :param swift_dir: non-default directory to read swift.conf from
+    """
+    global HASH_PATH_SUFFIX
+    global HASH_PATH_PREFIX
+    global SWIFT_CONF_FILE
+    if (swift_dir is not None and
+            swift_dir != os.path.dirname(SWIFT_CONF_FILE)):
+        SWIFT_CONF_FILE = os.path.join(
+            swift_dir, os.path.basename(SWIFT_CONF_FILE))
+        HASH_PATH_PREFIX = ''
+        HASH_PATH_SUFFIX = ''
+        validate_configuration()
+        return True
+    return False
 
 
 def validate_hash_conf():
@@ -343,6 +370,21 @@ def config_true_value(value):
         (isinstance(value, six.string_types) and value.lower() in TRUE_VALUES)
 
 
+def config_positive_int_value(value):
+    """
+    Returns positive int value if it can be cast by int() and it's an
+    integer > 0. (not including zero) Raises ValueError otherwise.
+    """
+    try:
+        value = int(value)
+        if value < 1:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise ValueError(
+            'Config option must be an positive int number, not "%s".' % value)
+    return value
+
+
 def config_auto_int_value(value, default):
     """
     Returns default if value is None or 'auto'.
@@ -479,8 +521,8 @@ def get_policy_index(req_headers, res_headers):
     Returns the appropriate index of the storage policy for the request from
     a proxy server
 
-    :param req: dict of the request headers.
-    :param res: dict of the response headers.
+    :param req_headers: dict of the request headers.
+    :param res_headers: dict of the response headers.
 
     :returns: string index of storage policy, or None
     """
@@ -890,6 +932,10 @@ class Timestamp(object):
         if self.timestamp >= 10000000000:
             raise ValueError('timestamp too large')
 
+    @classmethod
+    def now(cls, offset=0, delta=0):
+        return cls(time.time(), offset=offset, delta=delta)
+
     def __repr__(self):
         return INTERNAL_FORMAT % (self.timestamp, self.offset)
 
@@ -1259,7 +1305,7 @@ def split_path(path, minsegs=1, maxsegs=None, rest_with_last=False):
                            trailing data, raises ValueError.
     :returns: list of segments with a length of maxsegs (non-existent
               segments will return as None)
-    :raises: ValueError if given an invalid path
+    :raises ValueError: if given an invalid path
     """
     if not maxsegs:
         maxsegs = minsegs
@@ -1294,7 +1340,7 @@ def validate_device_partition(device, partition):
 
     :param device: device to validate
     :param partition: partition to validate
-    :raises: ValueError if given an invalid device or partition
+    :raises ValueError: if given an invalid device or partition
     """
     if not device or '/' in device or device in ['.', '..']:
         raise ValueError('Invalid device: %s' % quote(device or ''))
@@ -1365,6 +1411,27 @@ class NullLogger(object):
 
     def write(self, *args):
         # "Logs" the args to nowhere
+        pass
+
+    def exception(self, *args):
+        pass
+
+    def critical(self, *args):
+        pass
+
+    def error(self, *args):
+        pass
+
+    def warning(self, *args):
+        pass
+
+    def info(self, *args):
+        pass
+
+    def debug(self, *args):
+        pass
+
+    def log(self, *args):
         pass
 
 
@@ -2322,7 +2389,7 @@ def compute_eta(start_time, current_value, final_value):
 
 def unlink_older_than(path, mtime):
     """
-    Remove any file in a given path that that was last modified before mtime.
+    Remove any file in a given path that was last modified before mtime.
 
     :param path: path to remove file from
     :param mtime: timestamp of oldest file to keep
@@ -2333,7 +2400,7 @@ def unlink_older_than(path, mtime):
 
 def unlink_paths_older_than(filepaths, mtime):
     """
-    Remove any files from the given list that that were
+    Remove any files from the given list that were
     last modified before mtime.
 
     :param filepaths: a list of strings, the full paths of files to check
@@ -2395,6 +2462,8 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
                      not defined)
     :param defaults: dict of default values to pre-populate the config with
     :returns: dict of config items
+    :raises ValueError: if section_name does not exist
+    :raises IOError: if reading the file failed
     """
     if defaults is None:
         defaults = {}
@@ -2403,6 +2472,8 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
     else:
         c = ConfigParser(defaults)
     if hasattr(conf_path, 'readline'):
+        if hasattr(conf_path, 'seek'):
+            conf_path.seek(0)
         c.readfp(conf_path)
     else:
         if os.path.isdir(conf_path):
@@ -2411,15 +2482,15 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
         else:
             success = c.read(conf_path)
         if not success:
-            print(_("Unable to read config from %s") % conf_path)
-            sys.exit(1)
+            raise IOError(_("Unable to read config from %s") %
+                          conf_path)
     if section_name:
         if c.has_section(section_name):
             conf = dict(c.items(section_name))
         else:
-            print(_("Unable to find %(section)s config section in %(conf)s") %
-                  {'section': section_name, 'conf': conf_path})
-            sys.exit(1)
+            raise ValueError(
+                _("Unable to find %(section)s config section in %(conf)s") %
+                {'section': section_name, 'conf': conf_path})
         if "log_name" not in conf:
             if log_name is not None:
                 conf['log_name'] = log_name
@@ -2534,7 +2605,7 @@ def remove_file(path):
 
 def audit_location_generator(devices, datadir, suffix='',
                              mount_check=True, logger=None):
-    '''
+    """
     Given a devices path and a data directory, yield (path, device,
     partition) for all files in that directory
 
@@ -2546,7 +2617,7 @@ def audit_location_generator(devices, datadir, suffix='',
     :param mount_check: Flag to check if a mount check should be performed
                     on devices
     :param logger: a logger object
-    '''
+    """
     device_dir = listdir(devices)
     # randomize devices in case of process restart before sweep completed
     shuffle(device_dir)
@@ -2596,7 +2667,7 @@ def audit_location_generator(devices, datadir, suffix='',
 
 
 def ratelimit_sleep(running_time, max_rate, incr_by=1, rate_buffer=5):
-    '''
+    """
     Will eventlet.sleep() for the appropriate time so that the max_rate
     is never exceeded.  If max_rate is 0, will not ratelimit.  The
     maximum recommended rate should not exceed (1000 * incr_by) a second
@@ -2615,7 +2686,7 @@ def ratelimit_sleep(running_time, max_rate, incr_by=1, rate_buffer=5):
                         A larger number will result in larger spikes in rate
                         but better average accuracy. Must be > 0 to engage
                         rate-limiting behavior.
-    '''
+    """
     if max_rate <= 0 or incr_by <= 0:
         return running_time
 
@@ -2642,7 +2713,7 @@ def ratelimit_sleep(running_time, max_rate, incr_by=1, rate_buffer=5):
 
 
 class ContextPool(GreenPool):
-    "GreenPool subclassed to kill its coros when it gets gc'ed"
+    """GreenPool subclassed to kill its coros when it gets gc'ed"""
 
     def __enter__(self):
         return self
@@ -2788,7 +2859,7 @@ class StreamingPile(GreenAsyncPile):
 
 
 class ModifiedParseResult(ParseResult):
-    "Parse results class for urlparse."
+    """Parse results class for urlparse."""
 
     @property
     def hostname(self):
@@ -2901,7 +2972,7 @@ def affinity_key_function(affinity_str):
     :param affinity_str: affinity config value, e.g. "r1z2=3"
                          or "r1=1, r2z1=2, r2z2=2"
     :returns: single-argument function
-    :raises: ValueError if argument invalid
+    :raises ValueError: if argument invalid
     """
     affinity_str = affinity_str.strip()
 
@@ -2951,10 +3022,10 @@ def affinity_locality_predicate(write_affinity_str):
     If affinity_str is empty or all whitespace, then the resulting function
     will consider everything local
 
-    :param affinity_str: affinity config value, e.g. "r1z2"
+    :param write_affinity_str: affinity config value, e.g. "r1z2"
         or "r1, r2z1, r2z2"
     :returns: single-argument function, or None if affinity_str is empty
-    :raises: ValueError if argument invalid
+    :raises ValueError: if argument invalid
     """
     affinity_str = write_affinity_str.strip()
 
@@ -3016,18 +3087,27 @@ def human_readable(value):
 
 def put_recon_cache_entry(cache_entry, key, item):
     """
-    Function that will check if item is a dict, and if so put it under
-    cache_entry[key].  We use nested recon cache entries when the object
-    auditor runs in parallel or else in 'once' mode with a specified
-    subset of devices.
+    Update a recon cache entry item.
+
+    If ``item`` is an empty dict then any existing ``key`` in ``cache_entry``
+    will be deleted. Similarly if ``item`` is a dict and any of its values are
+    empty dicts then the corrsponsing key will be deleted from the nested dict
+    in ``cache_entry``.
+
+    We use nested recon cache entries when the object auditor
+    runs in parallel or else in 'once' mode with a specified subset of devices.
+
+    :param cache_entry: a dict of existing cache entries
+    :param key: key for item to update
+    :param item: value for item to update
     """
     if isinstance(item, dict):
+        if not item:
+            cache_entry.pop(key, None)
+            return
         if key not in cache_entry or key in cache_entry and not \
                 isinstance(cache_entry[key], dict):
             cache_entry[key] = {}
-        elif key in cache_entry and item == {}:
-            cache_entry.pop(key, None)
-            return
         for k, v in item.items():
             if v == {}:
                 cache_entry[key].pop(k, None)
@@ -3063,7 +3143,7 @@ def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2,
             try:
                 with NamedTemporaryFile(dir=os.path.dirname(cache_file),
                                         delete=False) as tf:
-                    tf.write(json.dumps(cache_entry) + '\n')
+                    tf.write(json.dumps(cache_entry, sort_keys=True) + '\n')
                 if set_owner:
                     os.chown(tf.name, pwd.getpwnam(set_owner).pw_uid, -1)
                 renamer(tf.name, cache_file, fsync=False)
@@ -3111,7 +3191,7 @@ def pairs(item_list):
     """
     Returns an iterator of all pairs of elements from item_list.
 
-    :param items: items (no duplicates allowed)
+    :param item_list: items (no duplicates allowed)
     """
     for i, item1 in enumerate(item_list):
         for item2 in item_list[(i + 1):]:
@@ -3405,6 +3485,83 @@ class LRUCache(object):
         return LRUCacheWrapped()
 
 
+class Spliterator(object):
+    """
+    Takes an iterator yielding sliceable things (e.g. strings or lists) and
+    yields subiterators, each yielding up to the requested number of items
+    from the source.
+
+    >>> si = Spliterator(["abcde", "fg", "hijkl"])
+    >>> ''.join(si.take(4))
+    "abcd"
+    >>> ''.join(si.take(3))
+    "efg"
+    >>> ''.join(si.take(1))
+    "h"
+    >>> ''.join(si.take(3))
+    "ijk"
+    >>> ''.join(si.take(3))
+    "l"  # shorter than requested; this can happen with the last iterator
+
+    """
+    def __init__(self, source_iterable):
+        self.input_iterator = iter(source_iterable)
+        self.leftovers = None
+        self.leftovers_index = 0
+        self._iterator_in_progress = False
+
+    def take(self, n):
+        if self._iterator_in_progress:
+            raise ValueError(
+                "cannot call take() again until the first iterator is"
+                " exhausted (has raised StopIteration)")
+        self._iterator_in_progress = True
+
+        try:
+            if self.leftovers:
+                # All this string slicing is a little awkward, but it's for
+                # a good reason. Consider a length N string that someone is
+                # taking k bytes at a time.
+                #
+                # With this implementation, we create one new string of
+                # length k (copying the bytes) on each call to take(). Once
+                # the whole input has been consumed, each byte has been
+                # copied exactly once, giving O(N) bytes copied.
+                #
+                # If, instead of this, we were to set leftovers =
+                # leftovers[k:] and omit leftovers_index, then each call to
+                # take() would copy k bytes to create the desired substring,
+                # then copy all the remaining bytes to reset leftovers,
+                # resulting in an overall O(N^2) bytes copied.
+                llen = len(self.leftovers) - self.leftovers_index
+                if llen <= n:
+                    n -= llen
+                    to_yield = self.leftovers[self.leftovers_index:]
+                    self.leftovers = None
+                    self.leftovers_index = 0
+                    yield to_yield
+                else:
+                    to_yield = self.leftovers[
+                        self.leftovers_index:(self.leftovers_index + n)]
+                    self.leftovers_index += n
+                    n = 0
+                    yield to_yield
+
+            while n > 0:
+                chunk = next(self.input_iterator)
+                cl = len(chunk)
+                if cl <= n:
+                    n -= cl
+                    yield chunk
+                else:
+                    self.leftovers = chunk
+                    self.leftovers_index = n
+                    yield chunk[:n]
+                    n = 0
+        finally:
+            self._iterator_in_progress = False
+
+
 def tpool_reraise(func, *args, **kwargs):
     """
     Hack to work around Eventlet's tpool not catching and reraising Timeouts.
@@ -3466,6 +3623,12 @@ def ismount_raw(path):
         # path/.. is the same i-node as path
         return True
 
+    # Device and inode checks are not properly working inside containerized
+    # environments, therefore using a workaround to check if there is a
+    # stubfile placed by an operator
+    if os.path.isfile(os.path.join(path, ".ismount")):
+        return True
+
     return False
 
 
@@ -3509,7 +3672,7 @@ def parse_content_range(content_range):
     :param content_range: Content-Range header value to parse,
         e.g. "bytes 100-1249/49004"
     :returns: 3-tuple (start, end, total)
-    :raises: ValueError if malformed
+    :raises ValueError: if malformed
     """
     found = re.search(_content_range_pattern, content_range)
     if not found:
@@ -3691,7 +3854,7 @@ def iter_multipart_mime_documents(wsgi_input, boundary, read_chunk_size=4096):
     :param boundary: The mime boundary to separate new file-like
                      objects on.
     :returns: A generator of file-like objects for each part.
-    :raises: MimeInvalid if the document is malformed
+    :raises MimeInvalid: if the document is malformed
     """
     boundary = '--' + boundary
     blen = len(boundary) + 2  # \r\n
@@ -4102,3 +4265,42 @@ def safe_json_loads(value):
         except (TypeError, ValueError):
             pass
     return None
+
+
+MD5_BLOCK_READ_BYTES = 4096
+
+
+def md5_hash_for_file(fname):
+    """
+    Get the MD5 checksum of a file.
+
+    :param fname: path to file
+    :returns: MD5 checksum, hex encoded
+    """
+    with open(fname, 'rb') as f:
+        md5sum = md5()
+        for block in iter(lambda: f.read(MD5_BLOCK_READ_BYTES), ''):
+            md5sum.update(block)
+    return md5sum.hexdigest()
+
+
+def replace_partition_in_path(path, part_power):
+    """
+    Takes a full path to a file and a partition power and returns
+    the same path, but with the correct partition number. Most useful when
+    increasing the partition power.
+
+    :param path: full path to a file, for example object .data file
+    :param part_power: partition power to compute correct partition number
+    :returns: Path with re-computed partition power
+    """
+
+    path_components = path.split(os.sep)
+    digest = binascii.unhexlify(path_components[-2])
+
+    part_shift = 32 - int(part_power)
+    part = struct.unpack_from('>I', digest)[0] >> part_shift
+
+    path_components[-4] = "%d" % part
+
+    return os.sep.join(path_components)

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import json
-import time
 from xml.sax import saxutils
 
 from swift.common.swob import HTTPOk, HTTPNoContent
@@ -28,7 +27,7 @@ class FakeAccountBroker(object):
     like an account broker would for a real, empty account with no metadata.
     """
     def get_info(self):
-        now = Timestamp(time.time()).internal
+        now = Timestamp.now().internal
         return {'container_count': 0,
                 'object_count': 0,
                 'bytes_used': 0,
@@ -81,24 +80,30 @@ def account_listing_response(account, req, response_content_type, broker=None,
                                                prefix, delimiter, reverse)
     if response_content_type == 'application/json':
         data = []
-        for (name, object_count, bytes_used, is_subdir) in account_list:
+        for (name, object_count, bytes_used, put_timestamp, is_subdir) \
+                in account_list:
             if is_subdir:
                 data.append({'subdir': name})
             else:
-                data.append({'name': name, 'count': object_count,
-                             'bytes': bytes_used})
+                data.append(
+                    {'name': name, 'count': object_count,
+                     'bytes': bytes_used,
+                     'last_modified': Timestamp(put_timestamp).isoformat})
         account_list = json.dumps(data)
     elif response_content_type.endswith('/xml'):
         output_list = ['<?xml version="1.0" encoding="UTF-8"?>',
                        '<account name=%s>' % saxutils.quoteattr(account)]
-        for (name, object_count, bytes_used, is_subdir) in account_list:
+        for (name, object_count, bytes_used, put_timestamp, is_subdir) \
+                in account_list:
             if is_subdir:
                 output_list.append(
                     '<subdir name=%s />' % saxutils.quoteattr(name))
             else:
                 item = '<container><name>%s</name><count>%s</count>' \
-                       '<bytes>%s</bytes></container>' % \
-                       (saxutils.escape(name), object_count, bytes_used)
+                       '<bytes>%s</bytes><last_modified>%s</last_modified>' \
+                       '</container>' % \
+                       (saxutils.escape(name), object_count,
+                        bytes_used, Timestamp(put_timestamp).isoformat)
                 output_list.append(item)
         output_list.append('</account>')
         account_list = '\n'.join(output_list)

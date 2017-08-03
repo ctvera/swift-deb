@@ -59,7 +59,7 @@ class TestObjectAsyncUpdate(ReplProbeTest):
         # Assert the other primary server now knows about container/obj
         objs = [o['name'] for o in direct_client.direct_get_container(
             cnode, cpart, self.account, container)[1]]
-        self.assertTrue(obj in objs)
+        self.assertIn(obj, objs)
 
     def test_missing_container(self):
         # In this test, we need to put container at handoff devices, so we
@@ -108,6 +108,9 @@ class TestObjectAsyncUpdate(ReplProbeTest):
         for cnode in cnodes:
             self.assertFalse(direct_client.direct_get_container(
                 cnode, cpart, self.account, container)[1])
+
+        # since the container is empty - we can delete it!
+        client.delete_container(self.url, self.token, container)
 
         # Re-run the object-updaters and now container replicas in primary
         # container servers should get updated

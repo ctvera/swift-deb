@@ -32,12 +32,13 @@ from six.moves import reload_module
 from swift.container.backend import DATADIR
 from swift.common import db_replicator
 from swift.common.utils import (normalize_timestamp, hash_path,
-                                storage_directory)
+                                storage_directory, Timestamp)
 from swift.common.exceptions import DriveNotMounted
 from swift.common.swob import HTTPException
 
 from test import unit
 from test.unit.common.test_db import ExampleBroker
+from test.unit import with_tempdir
 
 
 TEST_ACCOUNT_NAME = 'a c t'
@@ -192,6 +193,7 @@ class FakeBroker(object):
 
     def __init__(self, *args, **kwargs):
         self.locked = False
+        self.metadata = {}
         return None
 
     @contextmanager
@@ -313,7 +315,7 @@ class TestDBReplicator(unittest.TestCase):
         def other_req(method, path, body, headers):
             raise Exception('blah')
         conn.request = other_req
-        self.assertEqual(conn.replicate(1, 2, 3), None)
+        self.assertIsNone(conn.replicate(1, 2, 3))
 
     def test_rsync_file(self):
         replicator = TestReplicator({})
@@ -1094,6 +1096,74 @@ class TestDBReplicator(unittest.TestCase):
         finally:
             rmtree(drive)
 
+    @with_tempdir
+    def test_empty_suffix_and_hash_dirs_get_cleanedup(self, tempdir):
+        datadir = os.path.join(tempdir, 'containers')
+        db_path = ('450/afd/7089ab48d955ab0851fc51cc17a34afd/'
+                   '7089ab48d955ab0851fc51cc17a34afd.db')
+        random_file = ('1060/xyz/1234ab48d955ab0851fc51cc17a34xyz/'
+                       '1234ab48d955ab0851fc51cc17a34xyz.abc')
+
+        # trailing "/" indicates empty dir
+        paths = [
+            # empty part dir
+            '240/',
+            # empty suffix dir
+            '18/aba/',
+            # empty hashdir
+            '1054/27e/d41d8cd98f00b204e9800998ecf8427e/',
+            # database
+            db_path,
+            # non database file
+            random_file,
+        ]
+        for path in paths:
+            path = os.path.join(datadir, path)
+            os.makedirs(os.path.dirname(path))
+            if os.path.basename(path):
+                # our setup requires "directories" to end in "/" (i.e. basename
+                # is ''); otherwise, create an empty file
+                open(path, 'w')
+        # sanity
+        self.assertEqual({'240', '18', '1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+        for path in paths:
+            dirpath = os.path.join(datadir, os.path.dirname(path))
+            self.assertTrue(os.path.isdir(dirpath))
+
+        node_id = 1
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        expected = [
+            ('450', os.path.join(datadir, db_path), node_id),
+        ]
+        self.assertEqual(results, expected)
+
+        # all the empty leaf dirs are cleaned up
+        for path in paths:
+            if os.path.basename(path):
+                check = self.assertTrue
+            else:
+                check = self.assertFalse
+            dirpath = os.path.join(datadir, os.path.dirname(path))
+            isdir = os.path.isdir(dirpath)
+            check(isdir, '%r is%s a directory!' % (
+                dirpath, '' if isdir else ' not'))
+
+        # despite the leaves cleaned up it takes a few loops to finish it off
+        self.assertEqual({'18', '1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        self.assertEqual(results, expected)
+        self.assertEqual({'1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        self.assertEqual(results, expected)
+        # non db file in '1060' dir is not deleted and exception is handled
+        self.assertEqual({'1060', '450'},
+                         set(os.listdir(datadir)))
+
     def test_roundrobin_datadirs(self):
         listdir_calls = []
         isdir_calls = []
@@ -1162,18 +1232,12 @@ class TestDBReplicator(unittest.TestCase):
         def _rmdir(arg):
             rmdir_calls.append(arg)
 
-        orig_listdir = db_replicator.os.listdir
-        orig_isdir = db_replicator.os.path.isdir
-        orig_exists = db_replicator.os.path.exists
-        orig_shuffle = db_replicator.random.shuffle
-        orig_rmdir = db_replicator.os.rmdir
-
-        try:
-            db_replicator.os.listdir = _listdir
-            db_replicator.os.path.isdir = _isdir
-            db_replicator.os.path.exists = _exists
-            db_replicator.random.shuffle = _shuffle
-            db_replicator.os.rmdir = _rmdir
+        base = 'swift.common.db_replicator.'
+        with mock.patch(base + 'os.listdir', _listdir), \
+                mock.patch(base + 'os.path.isdir', _isdir), \
+                mock.patch(base + 'os.path.exists', _exists), \
+                mock.patch(base + 'random.shuffle', _shuffle), \
+                mock.patch(base + 'os.rmdir', _rmdir):
 
             datadirs = [('/srv/node/sda/containers', 1),
                         ('/srv/node/sdb/containers', 2)]
@@ -1266,12 +1330,6 @@ class TestDBReplicator(unittest.TestCase):
             self.assertEqual(
                 rmdir_calls, ['/srv/node/sda/containers/9999',
                               '/srv/node/sdb/containers/9999'])
-        finally:
-            db_replicator.os.listdir = orig_listdir
-            db_replicator.os.path.isdir = orig_isdir
-            db_replicator.os.path.exists = orig_exists
-            db_replicator.random.shuffle = orig_shuffle
-            db_replicator.os.rmdir = orig_rmdir
 
     @mock.patch("swift.common.db_replicator.ReplConnection", mock.Mock())
     def test_http_connect(self):
@@ -1296,8 +1354,8 @@ class TestReplToNode(unittest.TestCase):
         self.fake_info = {'id': 'a', 'point': -1, 'max_row': 20, 'hash': 'b',
                           'created_at': 100, 'put_timestamp': 0,
                           'delete_timestamp': 0, 'count': 0,
-                          'metadata': {
-                              'Test': ('Value', normalize_timestamp(1))}}
+                          'metadata': json.dumps({
+                              'Test': ('Value', normalize_timestamp(1))})}
         self.replicator.logger = mock.Mock()
         self.replicator._rsync_db = mock.Mock(return_value=True)
         self.replicator._usync_db = mock.Mock(return_value=True)
@@ -1341,6 +1399,18 @@ class TestReplToNode(unittest.TestCase):
         self.assertEqual(self.replicator._rsync_db.call_count, 0)
         self.assertEqual(self.replicator._usync_db.call_count, 0)
 
+    def test_repl_to_node_metadata_update(self):
+        now = Timestamp(time.time()).internal
+        rmetadata = {"X-Container-Sysmeta-Test": ("XYZ", now)}
+        rinfo = {"id": 3, "point": -1, "max_row": 20, "hash": "b",
+                 "metadata": json.dumps(rmetadata)}
+        self.http = ReplHttp(json.dumps(rinfo))
+        self.broker.get_sync()
+        self.assertEqual(self.replicator._repl_to_node(
+            self.fake_node, self.broker, '0', self.fake_info), True)
+        metadata = self.broker.metadata
+        self.assertEqual({}, metadata)
+
     def test_repl_to_node_not_found(self):
         self.http = ReplHttp('{"id": 3, "point": -1}', set_status=404)
         self.assertEqual(self.replicator._repl_to_node(
@@ -1362,8 +1432,8 @@ class TestReplToNode(unittest.TestCase):
     def test_repl_to_node_300_status(self):
         self.http = ReplHttp('{"id": 3, "point": -1}', set_status=300)
 
-        self.assertEqual(self.replicator._repl_to_node(
-            self.fake_node, FakeBroker(), '0', self.fake_info), None)
+        self.assertIsNone(self.replicator._repl_to_node(
+            self.fake_node, FakeBroker(), '0', self.fake_info))
 
     def test_repl_to_node_not_response(self):
         self.http = mock.Mock(replicate=mock.Mock(return_value=None))
@@ -1556,6 +1626,76 @@ class TestReplicatorSync(unittest.TestCase):
         # but empty part dir is cleaned up!
         parts = os.listdir(part_root)
         self.assertEqual(0, len(parts))
+
+    def test_rsync_then_merge(self):
+        # setup current db (and broker)
+        broker = self._get_broker('a', 'c', node_index=0)
+        part, node = self._get_broker_part_node(broker)
+        part = str(part)
+        put_timestamp = normalize_timestamp(time.time())
+        broker.initialize(put_timestamp)
+        put_metadata = {'example-meta': ['bah', put_timestamp]}
+        broker.update_metadata(put_metadata)
+
+        # sanity (re-open, and the db keeps the metadata)
+        broker = self._get_broker('a', 'c', node_index=0)
+        self.assertEqual(put_metadata, broker.metadata)
+
+        # create rsynced db in tmp dir
+        obj_hash = hash_path('a', 'c')
+        rsynced_db_broker = self.backend(
+            os.path.join(self.root, node['device'], 'tmp', obj_hash + '.db'),
+            account='a', container='b')
+        rsynced_db_broker.initialize(put_timestamp)
+
+        # do rysnc_then_merge
+        rpc = db_replicator.ReplicatorRpc(
+            self.root, self.datadir, self.backend, False)
+        response = rpc.dispatch((node['device'], part, obj_hash),
+                                ['rsync_then_merge', obj_hash + '.db', 'arg2'])
+        # sanity
+        self.assertEqual('204 No Content', response.status)
+        self.assertEqual(204, response.status_int)
+
+        # re-open the db
+        broker = self._get_broker('a', 'c', node_index=0)
+        # keep the metadata in existing db
+        self.assertEqual(put_metadata, broker.metadata)
+
+    def test_replicator_sync(self):
+        # setup current db (and broker)
+        broker = self._get_broker('a', 'c', node_index=0)
+        part, node = self._get_broker_part_node(broker)
+        part = str(part)
+        put_timestamp = normalize_timestamp(time.time())
+        broker.initialize(put_timestamp)
+        put_metadata = {'example-meta': ['bah', put_timestamp]}
+        sync_local_metadata = {
+            "meta1": ["data1", put_timestamp],
+            "meta2": ["data2", put_timestamp]}
+        broker.update_metadata(put_metadata)
+
+        # sanity (re-open, and the db keeps the metadata)
+        broker = self._get_broker('a', 'c', node_index=0)
+        self.assertEqual(put_metadata, broker.metadata)
+
+        # do rysnc_then_merge
+        rpc = db_replicator.ReplicatorRpc(
+            self.root, self.datadir, ExampleBroker, False)
+        response = rpc.sync(
+            broker, (broker.get_sync('id_') + 1, 12345, 'id_',
+                     put_timestamp, put_timestamp, '0',
+                     json.dumps(sync_local_metadata)))
+        # sanity
+        self.assertEqual('200 OK', response.status)
+        self.assertEqual(200, response.status_int)
+
+        # re-open the db
+        broker = self._get_broker('a', 'c', node_index=0)
+        # keep the both metadata in existing db and local db
+        expected = put_metadata.copy()
+        expected.update(sync_local_metadata)
+        self.assertEqual(expected, broker.metadata)
 
 
 if __name__ == '__main__':

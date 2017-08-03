@@ -229,6 +229,13 @@ class TestRingBuilder(unittest.TestCase):
                              'ip': '127.0.0.1', 'port': 6200})
         self.assertEqual(rb.devs[1]['id'], 1)
         self.assertEqual(dev_id, 1)
+        # some keys are required
+        self.assertRaises(ValueError, rb.add_dev, {})
+        stub_dev = {'weight': 1, 'ip': '127.0.0.1', 'port': 7000}
+        for key in (stub_dev.keys()):
+            dev = stub_dev.copy()
+            dev.pop(key)
+            self.assertRaises(ValueError, rb.add_dev, dev)
 
     def test_set_dev_weight(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -292,10 +299,12 @@ class TestRingBuilder(unittest.TestCase):
         #   >>> bin(int(struct.pack('!f', 1.0/(33)).encode('hex'), 16))
         #   '0b111100111110000011111000010000'
         rb = ring.RingBuilder(8, 3, 1)
-        for id, (region, zone) in enumerate(11 * [(0, 0), (1, 10), (1, 11)]):
-            rb.add_dev({'id': id, 'region': region, 'zone': zone, 'weight': 1,
-                        'ip': '127.0.0.1', 'port': 10000 + region * 100 + zone,
-                        'device': 'sda%d' % id})
+        for dev_id, (region, zone) in enumerate(
+                11 * [(0, 0), (1, 10), (1, 11)]):
+            rb.add_dev({'id': dev_id, 'region': region, 'zone': zone,
+                        'weight': 1, 'ip': '127.0.0.1',
+                        'port': 10000 + region * 100 + zone,
+                        'device': 'sda%d' % dev_id})
         rb.rebalance()
         self.assertEqual(self._partition_counts(rb, 'zone'),
                          {0: 256, 10: 256, 11: 256})
@@ -756,21 +765,23 @@ class TestRingBuilder(unittest.TestCase):
         expected = defaultdict(int, {0: 256, 1: 256, 2: 86, 3: 85, 4: 85})
         self.assertEqual(expected, self._partition_counts(rb, key='zone'))
 
-        parts_with_moved_count = defaultdict(int)
+        zone_histogram = defaultdict(int)
         for part in range(rb.parts):
-            zones = set()
-            for replica in range(rb.replicas):
-                zones.add(rb.devs[rb._replica2part2dev[replica][part]]['zone'])
-            moved_replicas = len(zones - {0, 1})
-            parts_with_moved_count[moved_replicas] += 1
+            zones = [
+                rb.devs[rb._replica2part2dev[replica][part]]['zone']
+                for replica in range(rb.replicas)]
+            zone_histogram[tuple(sorted(zones))] += 1
 
         # We expect that every partition moved exactly one replica
-        expected = {1: 256}
-        self.assertEqual(parts_with_moved_count, expected)
+        expected = {
+            (0, 1, 2): 86,
+            (0, 1, 3): 85,
+            (0, 1, 4): 85,
+        }
+        self.assertEqual(zone_histogram, expected)
 
-        # After rebalancing two more times, we expect that everything is in a
+        # After rebalancing one more times, we expect that everything is in a
         # good state
-        rb.rebalance(seed=3)
         rb.rebalance(seed=3)
 
         self.assertEqual(0, rb.dispersion)
@@ -2018,6 +2029,110 @@ class TestRingBuilder(unittest.TestCase):
                                                  mock_fh.__enter__(),
                                                  protocol=2)
 
+    def test_id(self):
+        rb = ring.RingBuilder(8, 3, 1)
+        # check id is assigned after save
+        builder_file = os.path.join(self.testdir, 'test_save.builder')
+        rb.save(builder_file)
+        assigned_id = rb.id
+        # check id doesn't change when builder is saved again
+        rb.save(builder_file)
+        self.assertEqual(assigned_id, rb.id)
+        # check same id after loading
+        loaded_rb = ring.RingBuilder.load(builder_file)
+        self.assertEqual(assigned_id, loaded_rb.id)
+        # check id doesn't change when loaded builder is saved
+        rb.save(builder_file)
+        self.assertEqual(assigned_id, rb.id)
+        # check same id after loading again
+        loaded_rb = ring.RingBuilder.load(builder_file)
+        self.assertEqual(assigned_id, loaded_rb.id)
+        # check id remains once assigned, even when save fails
+        with self.assertRaises(IOError):
+            rb.save(os.path.join(
+                self.testdir, 'non_existent_dir', 'test_save.file'))
+        self.assertEqual(assigned_id, rb.id)
+
+        # sanity check that different builders get different id's
+        other_rb = ring.RingBuilder(8, 3, 1)
+        other_builder_file = os.path.join(self.testdir, 'test_save_2.builder')
+        other_rb.save(other_builder_file)
+        self.assertNotEqual(assigned_id, other_rb.id)
+
+    def test_id_copy_from(self):
+        # copy_from preserves the same id
+        orig_rb = ring.RingBuilder(8, 3, 1)
+        copy_rb = ring.RingBuilder(8, 3, 1)
+        copy_rb.copy_from(orig_rb)
+        for rb in(orig_rb, copy_rb):
+            with self.assertRaises(AttributeError) as cm:
+                rb.id
+            self.assertIn('id attribute has not been initialised',
+                          cm.exception.message)
+
+        builder_file = os.path.join(self.testdir, 'test_save.builder')
+        orig_rb.save(builder_file)
+        copy_rb = ring.RingBuilder(8, 3, 1)
+        copy_rb.copy_from(orig_rb)
+        self.assertEqual(orig_rb.id, copy_rb.id)
+
+    def test_id_legacy_builder_file(self):
+        builder_file = os.path.join(self.testdir, 'legacy.builder')
+
+        def do_test():
+            # load legacy file
+            loaded_rb = ring.RingBuilder.load(builder_file)
+            with self.assertRaises(AttributeError) as cm:
+                loaded_rb.id
+            self.assertIn('id attribute has not been initialised',
+                          cm.exception.message)
+
+            # check saving assigns an id, and that it is persisted
+            loaded_rb.save(builder_file)
+            assigned_id = loaded_rb.id
+            self.assertIsNotNone(assigned_id)
+            loaded_rb = ring.RingBuilder.load(builder_file)
+            self.assertEqual(assigned_id, loaded_rb.id)
+
+        # older builders had no id so the pickled builder dict had no id key
+        rb = ring.RingBuilder(8, 3, 1)
+        orig_to_dict = rb.to_dict
+
+        def mock_to_dict():
+            result = orig_to_dict()
+            result.pop('id')
+            return result
+
+        with mock.patch.object(rb, 'to_dict', mock_to_dict):
+            rb.save(builder_file)
+        do_test()
+
+        # even older builders pickled the class instance, which would have had
+        # no _id attribute
+        rb = ring.RingBuilder(8, 3, 1)
+        del rb.logger  # logger type cannot be pickled
+        del rb._id
+        builder_file = os.path.join(self.testdir, 'legacy.builder')
+        with open(builder_file, 'wb') as f:
+            pickle.dump(rb, f, protocol=2)
+        do_test()
+
+    def test_id_not_initialised_errors(self):
+        rb = ring.RingBuilder(8, 3, 1)
+        # id is not set until builder has been saved
+        with self.assertRaises(AttributeError) as cm:
+            rb.id
+        self.assertIn('id attribute has not been initialised',
+                      cm.exception.message)
+        # save must succeed for id to be assigned
+        with self.assertRaises(IOError):
+            rb.save(os.path.join(
+                self.testdir, 'non-existent-dir', 'foo.builder'))
+        with self.assertRaises(AttributeError) as cm:
+            rb.id
+        self.assertIn('id attribute has not been initialised',
+                      cm.exception.message)
+
     def test_search_devs(self):
         rb = ring.RingBuilder(8, 3, 1)
         devs = [{'id': 0, 'region': 0, 'zone': 0, 'weight': 1,
@@ -2489,6 +2604,40 @@ class TestRingBuilder(unittest.TestCase):
         except exceptions.DuplicateDeviceError:
             self.fail("device hole not reused")
 
+    def test_prepare_increase_partition_power(self):
+        ring_file = os.path.join(self.testdir, 'test_partpower.ring.gz')
+
+        rb = ring.RingBuilder(8, 3.0, 1)
+        self.assertEqual(rb.part_power, 8)
+
+        # add more devices than replicas to the ring
+        for i in range(10):
+            dev = "sdx%s" % i
+            rb.add_dev({'id': i, 'region': 0, 'zone': 0, 'weight': 1,
+                        'ip': '127.0.0.1', 'port': 10000, 'device': dev})
+        rb.rebalance(seed=1)
+
+        self.assertFalse(rb.cancel_increase_partition_power())
+        self.assertEqual(rb.part_power, 8)
+        self.assertIsNone(rb.next_part_power)
+
+        self.assertFalse(rb.finish_increase_partition_power())
+        self.assertEqual(rb.part_power, 8)
+        self.assertIsNone(rb.next_part_power)
+
+        self.assertTrue(rb.prepare_increase_partition_power())
+        self.assertEqual(rb.part_power, 8)
+        self.assertEqual(rb.next_part_power, 9)
+
+        # Save .ring.gz, and load ring from it to ensure prev/next is set
+        rd = rb.get_ring()
+        rd.save(ring_file)
+
+        r = ring.Ring(ring_file)
+        expected_part_shift = 32 - 8
+        self.assertEqual(expected_part_shift, r._part_shift)
+        self.assertEqual(9, r.next_part_power)
+
     def test_increase_partition_power(self):
         rb = ring.RingBuilder(8, 3.0, 1)
         self.assertEqual(rb.part_power, 8)
@@ -2508,12 +2657,17 @@ class TestRingBuilder(unittest.TestCase):
         old_part, old_nodes = r.get_nodes("acc", "cont", "obj")
         old_version = rb.version
 
-        rb.increase_partition_power()
+        self.assertTrue(rb.prepare_increase_partition_power())
+        self.assertTrue(rb.increase_partition_power())
         rb.validate()
         changed_parts, _balance, removed_devs = rb.rebalance()
 
         self.assertEqual(changed_parts, 0)
         self.assertEqual(removed_devs, 0)
+
+        # Make sure cancellation is not possible
+        # after increasing the partition power
+        self.assertFalse(rb.cancel_increase_partition_power())
 
         old_ring = r
         rd = rb.get_ring()
@@ -2522,8 +2676,9 @@ class TestRingBuilder(unittest.TestCase):
         new_part, new_nodes = r.get_nodes("acc", "cont", "obj")
 
         # sanity checks
-        self.assertEqual(rb.part_power, 9)
-        self.assertEqual(rb.version, old_version + 2)
+        self.assertEqual(9, rb.part_power)
+        self.assertEqual(9, rb.next_part_power)
+        self.assertEqual(rb.version, old_version + 3)
 
         # make sure there is always the same device assigned to every pair of
         # partitions
@@ -2554,6 +2709,107 @@ class TestRingBuilder(unittest.TestCase):
             # Importantly, we expect the objects to be placed on the same
             # nodes after increasing the partition power
             self.assertEqual(old_nodes, new_nodes)
+
+    def test_finalize_increase_partition_power(self):
+        ring_file = os.path.join(self.testdir, 'test_partpower.ring.gz')
+
+        rb = ring.RingBuilder(8, 3.0, 1)
+        self.assertEqual(rb.part_power, 8)
+
+        # add more devices than replicas to the ring
+        for i in range(10):
+            dev = "sdx%s" % i
+            rb.add_dev({'id': i, 'region': 0, 'zone': 0, 'weight': 1,
+                        'ip': '127.0.0.1', 'port': 10000, 'device': dev})
+        rb.rebalance(seed=1)
+
+        self.assertTrue(rb.prepare_increase_partition_power())
+
+        # Make sure this doesn't do any harm before actually increasing the
+        # partition power
+        self.assertFalse(rb.finish_increase_partition_power())
+        self.assertEqual(rb.next_part_power, 9)
+
+        self.assertTrue(rb.increase_partition_power())
+
+        self.assertFalse(rb.prepare_increase_partition_power())
+        self.assertEqual(rb.part_power, 9)
+        self.assertEqual(rb.next_part_power, 9)
+
+        self.assertTrue(rb.finish_increase_partition_power())
+
+        self.assertEqual(rb.part_power, 9)
+        self.assertIsNone(rb.next_part_power)
+
+        # Save .ring.gz, and load ring from it to ensure prev/next is set
+        rd = rb.get_ring()
+        rd.save(ring_file)
+
+        r = ring.Ring(ring_file)
+        expected_part_shift = 32 - 9
+        self.assertEqual(expected_part_shift, r._part_shift)
+        self.assertIsNone(r.next_part_power)
+
+    def test_prepare_increase_partition_power_failed(self):
+        rb = ring.RingBuilder(8, 3.0, 1)
+        self.assertEqual(rb.part_power, 8)
+
+        self.assertTrue(rb.prepare_increase_partition_power())
+        self.assertEqual(rb.next_part_power, 9)
+
+        # next_part_power is still set, do not increase again
+        self.assertFalse(rb.prepare_increase_partition_power())
+        self.assertEqual(rb.next_part_power, 9)
+
+    def test_increase_partition_power_failed(self):
+        rb = ring.RingBuilder(8, 3.0, 1)
+        self.assertEqual(rb.part_power, 8)
+
+        # add more devices than replicas to the ring
+        for i in range(10):
+            dev = "sdx%s" % i
+            rb.add_dev({'id': i, 'region': 0, 'zone': 0, 'weight': 1,
+                        'ip': '127.0.0.1', 'port': 10000, 'device': dev})
+        rb.rebalance(seed=1)
+
+        # next_part_power not set, can't increase the part power
+        self.assertFalse(rb.increase_partition_power())
+        self.assertEqual(rb.part_power, 8)
+
+        self.assertTrue(rb.prepare_increase_partition_power())
+
+        self.assertTrue(rb.increase_partition_power())
+        self.assertEqual(rb.part_power, 9)
+
+        # part_power already increased
+        self.assertFalse(rb.increase_partition_power())
+        self.assertEqual(rb.part_power, 9)
+
+    def test_cancel_increase_partition_power(self):
+        rb = ring.RingBuilder(8, 3.0, 1)
+        self.assertEqual(rb.part_power, 8)
+
+        # add more devices than replicas to the ring
+        for i in range(10):
+            dev = "sdx%s" % i
+            rb.add_dev({'id': i, 'region': 0, 'zone': 0, 'weight': 1,
+                        'ip': '127.0.0.1', 'port': 10000, 'device': dev})
+        rb.rebalance(seed=1)
+
+        old_version = rb.version
+        self.assertTrue(rb.prepare_increase_partition_power())
+
+        # sanity checks
+        self.assertEqual(8, rb.part_power)
+        self.assertEqual(9, rb.next_part_power)
+        self.assertEqual(rb.version, old_version + 1)
+
+        self.assertTrue(rb.cancel_increase_partition_power())
+        rb.validate()
+
+        self.assertEqual(8, rb.part_power)
+        self.assertEqual(8, rb.next_part_power)
+        self.assertEqual(rb.version, old_version + 2)
 
 
 class TestGetRequiredOverload(unittest.TestCase):

@@ -216,8 +216,7 @@ class TestReconSuccess(TestCase):
         # which will cause ring md5 checks to fail
         self.tempdir = '/tmp/swift_recon_md5_test'
         utils.mkdirs(self.tempdir)
-        self.app = recon.ReconMiddleware(FakeApp(),
-                                         {'swift_dir': self.tempdir})
+        self.app = self._get_app()
         self.mockos = MockOS()
         self.fakecache = FakeFromCache()
         self.real_listdir = os.listdir
@@ -231,6 +230,13 @@ class TestReconSuccess(TestCase):
         self.real_from_cache = self.app._from_recon_cache
         self.app._from_recon_cache = self.fakecache.fake_from_recon_cache
         self.frecon = FakeRecon()
+
+        # replace hash md5 implementation of the md5_hash_for_file function
+        mock_hash_for_file = mock.patch(
+            'swift.common.middleware.recon.md5_hash_for_file',
+            lambda f, **kwargs: 'hash-' + os.path.basename(f))
+        self.addCleanup(mock_hash_for_file.stop)
+        mock_hash_for_file.start()
 
         self.ring_part_shift = 5
         self.ring_devs = [{'id': 0, 'zone': 0, 'weight': 1.0,
@@ -257,6 +263,10 @@ class TestReconSuccess(TestCase):
         self.app._from_recon_cache = self.real_from_cache
         del self.fakecache
         rmtree(self.tempdir)
+
+    def _get_app(self):
+        app = recon.ReconMiddleware(FakeApp(), {'swift_dir': self.tempdir})
+        return app
 
     def _create_ring(self, ringpath, replica_map, devs, part_shift):
         def fake_time():
@@ -314,20 +324,20 @@ class TestReconSuccess(TestCase):
         # We should only see configured and present rings, so to handle the
         # "normal" case just patch the policies to match the existing rings.
         expt_out = {'%s/account.ring.gz' % self.tempdir:
-                    '11e0c98abb209474d40d6a9a8a523803',
+                    'hash-account.ring.gz',
                     '%s/container.ring.gz' % self.tempdir:
-                    '6685496a4045ce0be123068e0165a64d',
+                    'hash-container.ring.gz',
                     '%s/object.ring.gz' % self.tempdir:
-                    '782728be98644fb725e165d4bf5728d4',
+                    'hash-object.ring.gz',
                     '%s/object-1.ring.gz' % self.tempdir:
-                    '7c3a4bc9f724d4eb69c9b797cdc28b8c',
+                    'hash-object-1.ring.gz',
                     '%s/object-2.ring.gz' % self.tempdir:
-                    '324b9c4da20cf7ef097edbd219d296e0'}
+                    'hash-object-2.ring.gz'}
 
         # We need to instantiate app after overriding the configured policies.
+        app = self._get_app()
         # object-{1,2}.ring.gz should both appear as they are present on disk
         # and were configured as policies.
-        app = recon.ReconMiddleware(FakeApp(), {'swift_dir': self.tempdir})
         self.assertEqual(sorted(app.get_ring_md5().items()),
                          sorted(expt_out.items()))
 
@@ -336,14 +346,12 @@ class TestReconSuccess(TestCase):
         # still produce a ringmd5 entry with a None for the hash. Note that
         # this is different than if an expected ring file simply doesn't exist,
         # in which case it is excluded altogether from the ringmd5 response.
-
-        def fake_open(fn, fmode):
-            raise IOError
-
         expt_out = {'%s/account.ring.gz' % self.tempdir: None,
                     '%s/container.ring.gz' % self.tempdir: None,
                     '%s/object.ring.gz' % self.tempdir: None}
-        ringmd5 = self.app.get_ring_md5(openr=fake_open)
+        with mock.patch('swift.common.middleware.recon.md5_hash_for_file',
+                        side_effect=IOError):
+            ringmd5 = self.app.get_ring_md5()
         self.assertEqual(sorted(ringmd5.items()),
                          sorted(expt_out.items()))
 
@@ -351,29 +359,30 @@ class TestReconSuccess(TestCase):
         # Ring files that are present but produce an IOError on read will
         # show a None hash, but if they can be read later their hash
         # should become available in the ringmd5 response.
-
-        def fake_open(fn, fmode):
-            raise IOError
-
         expt_out = {'%s/account.ring.gz' % self.tempdir: None,
                     '%s/container.ring.gz' % self.tempdir: None,
                     '%s/object.ring.gz' % self.tempdir: None}
-        ringmd5 = self.app.get_ring_md5(openr=fake_open)
+        with mock.patch('swift.common.middleware.recon.md5_hash_for_file',
+                        side_effect=IOError):
+            ringmd5 = self.app.get_ring_md5()
         self.assertEqual(sorted(ringmd5.items()),
                          sorted(expt_out.items()))
 
         # If we fix a ring and it can be read again, its hash should then
         # appear using the same app instance
-        def fake_open_objonly(fn, fmode):
+        def fake_hash_for_file(fn):
             if 'object' not in fn:
                 raise IOError
-            return open(fn, fmode)
+            return 'hash-' + os.path.basename(fn)
 
         expt_out = {'%s/account.ring.gz' % self.tempdir: None,
                     '%s/container.ring.gz' % self.tempdir: None,
                     '%s/object.ring.gz' % self.tempdir:
-                    '782728be98644fb725e165d4bf5728d4'}
-        ringmd5 = self.app.get_ring_md5(openr=fake_open_objonly)
+                    'hash-object.ring.gz'}
+
+        with mock.patch('swift.common.middleware.recon.md5_hash_for_file',
+                        fake_hash_for_file):
+            ringmd5 = self.app.get_ring_md5()
         self.assertEqual(sorted(ringmd5.items()),
                          sorted(expt_out.items()))
 
@@ -387,19 +396,19 @@ class TestReconSuccess(TestCase):
         # later moved into place, we shouldn't need to restart object-server
         # for it to appear in recon.
         expt_out = {'%s/account.ring.gz' % self.tempdir:
-                    '11e0c98abb209474d40d6a9a8a523803',
+                    'hash-account.ring.gz',
                     '%s/container.ring.gz' % self.tempdir:
-                    '6685496a4045ce0be123068e0165a64d',
+                    'hash-container.ring.gz',
                     '%s/object.ring.gz' % self.tempdir:
-                    '782728be98644fb725e165d4bf5728d4',
+                    'hash-object.ring.gz',
                     '%s/object-2.ring.gz' % self.tempdir:
-                    '324b9c4da20cf7ef097edbd219d296e0'}
+                    'hash-object-2.ring.gz'}
 
         # We need to instantiate app after overriding the configured policies.
+        app = self._get_app()
         # object-1.ring.gz should not appear as it's present but unconfigured.
         # object-3502.ring.gz should not appear as it's configured but not
-        # present.
-        app = recon.ReconMiddleware(FakeApp(), {'swift_dir': self.tempdir})
+        # (yet) present.
         self.assertEqual(sorted(app.get_ring_md5().items()),
                          sorted(expt_out.items()))
 
@@ -412,7 +421,7 @@ class TestReconSuccess(TestCase):
                    array.array('H', [1, 1, 0, 3])]
         self._create_ring(os.path.join(self.tempdir, ringfn),
                           ringmap, self.ring_devs, self.ring_part_shift)
-        expt_out[ringpath] = 'a7e591642beea6933f64aebd56f357d9'
+        expt_out[ringpath] = 'hash-' + ringfn
 
         # We should now see it in the ringmd5 response, without a restart
         # (using the same app instance)
@@ -428,19 +437,19 @@ class TestReconSuccess(TestCase):
         # Object rings that are configured but missing aren't meant to appear
         # in the ringmd5 response.
         expt_out = {'%s/account.ring.gz' % self.tempdir:
-                    '11e0c98abb209474d40d6a9a8a523803',
+                    'hash-account.ring.gz',
                     '%s/container.ring.gz' % self.tempdir:
-                    '6685496a4045ce0be123068e0165a64d',
+                    'hash-container.ring.gz',
                     '%s/object.ring.gz' % self.tempdir:
-                    '782728be98644fb725e165d4bf5728d4',
+                    'hash-object.ring.gz',
                     '%s/object-2.ring.gz' % self.tempdir:
-                    '324b9c4da20cf7ef097edbd219d296e0'}
+                    'hash-object-2.ring.gz'}
 
         # We need to instantiate app after overriding the configured policies.
+        app = self._get_app()
         # object-1.ring.gz should not appear as it's present but unconfigured.
         # object-2305.ring.gz should not appear as it's configured but not
         # present.
-        app = recon.ReconMiddleware(FakeApp(), {'swift_dir': self.tempdir})
         self.assertEqual(sorted(app.get_ring_md5().items()),
                          sorted(expt_out.items()))
 
@@ -451,16 +460,16 @@ class TestReconSuccess(TestCase):
         # Object rings that are present but not configured in swift.conf
         # aren't meant to appear in the ringmd5 response.
         expt_out = {'%s/account.ring.gz' % self.tempdir:
-                    '11e0c98abb209474d40d6a9a8a523803',
+                    'hash-account.ring.gz',
                     '%s/container.ring.gz' % self.tempdir:
-                    '6685496a4045ce0be123068e0165a64d',
+                    'hash-container.ring.gz',
                     '%s/object.ring.gz' % self.tempdir:
-                    '782728be98644fb725e165d4bf5728d4'}
+                    'hash-object.ring.gz'}
 
         # We need to instantiate app after overriding the configured policies.
+        app = self._get_app()
         # object-{1,2}.ring.gz should not appear as they are present on disk
         # but were not configured as policies.
-        app = recon.ReconMiddleware(FakeApp(), {'swift_dir': self.tempdir})
         self.assertEqual(sorted(app.get_ring_md5().items()),
                          sorted(expt_out.items()))
 
@@ -1402,8 +1411,11 @@ class TestReconMiddleware(unittest.TestCase):
 
     def test_get_swift_conf_md5_fail(self):
         """Test get_swift_conf_md5 failure by failing file open"""
-        resp = self.real_app_get_swift_conf_md5(fail_io_open)
+        with mock.patch('swift.common.middleware.recon.md5_hash_for_file',
+                        side_effect=IOError):
+            resp = self.real_app_get_swift_conf_md5()
         self.assertIsNone(resp['/etc/swift/swift.conf'])
+
 
 if __name__ == '__main__':
     unittest.main()

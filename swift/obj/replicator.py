@@ -38,7 +38,7 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
 from swift.obj import ssync_sender
-from swift.obj.diskfile import DiskFileManager, get_data_dir, get_tmp_dir
+from swift.obj.diskfile import get_data_dir, get_tmp_dir, DiskFileRouter
 from swift.common.storage_policy import POLICIES, REPL_POLICY
 
 DEFAULT_RSYNC_TIMEOUT = 900
@@ -77,7 +77,6 @@ class ObjectReplicator(Daemon):
         self.stats_interval = int(conf.get('stats_interval', '300'))
         self.ring_check_interval = int(conf.get('ring_check_interval', 15))
         self.next_check = time.time() + self.ring_check_interval
-        self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
         self.replication_cycle = random.randint(0, 9)
         self.partition_times = []
         self.interval = int(conf.get('interval') or
@@ -91,13 +90,6 @@ class ObjectReplicator(Daemon):
         self.rsync_module = conf.get('rsync_module', '').rstrip('/')
         if not self.rsync_module:
             self.rsync_module = '{replication_ip}::object'
-            if config_true_value(conf.get('vm_test_mode', 'no')):
-                self.logger.warning('Option object-replicator/vm_test_mode '
-                                    'is deprecated and will be removed in a '
-                                    'future version. Update your '
-                                    'configuration to use option '
-                                    'object-replicator/rsync_module.')
-                self.rsync_module += '{replication_port}'
         self.http_timeout = int(conf.get('http_timeout', 60))
         self.lockup_timeout = int(conf.get('lockup_timeout', 1800))
         self.recon_cache_path = conf.get('recon_cache_path',
@@ -121,7 +113,7 @@ class ObjectReplicator(Daemon):
                                 'operation, please disable handoffs_first and '
                                 'handoff_delete before the next '
                                 'normal rebalance')
-        self._diskfile_mgr = DiskFileManager(conf, self.logger)
+        self._df_router = DiskFileRouter(conf, self.logger)
 
     def _zero_stats(self):
         """Zero out the stats."""
@@ -319,7 +311,7 @@ class ObjectReplicator(Daemon):
                         failure_devs_info.add((node['replication_ip'],
                                                node['device']))
                     responses.append(success)
-                for region, cand_objs in synced_remote_regions.items():
+                for cand_objs in synced_remote_regions.values():
                     if delete_objs is None:
                         delete_objs = cand_objs
                     else:
@@ -406,13 +398,14 @@ class ObjectReplicator(Daemon):
         target_devs_info = set()
         failure_devs_info = set()
         begin = time.time()
+        df_mgr = self._df_router[job['policy']]
         try:
             hashed, local_hash = tpool_reraise(
-                self._diskfile_mgr._get_hashes, job['path'],
+                df_mgr._get_hashes, job['device'],
+                job['partition'], job['policy'],
                 do_listdir=_do_listdir(
                     int(job['partition']),
-                    self.replication_cycle),
-                reclaim_age=self.reclaim_age)
+                    self.replication_cycle))
             self.suffix_hash += hashed
             self.logger.update_stats('suffix.hashes', hashed)
             attempts_left = len(job['nodes'])
@@ -462,9 +455,9 @@ class ObjectReplicator(Daemon):
                         self.stats['hashmatch'] += 1
                         continue
                     hashed, recalc_hash = tpool_reraise(
-                        self._diskfile_mgr._get_hashes,
-                        job['path'], recalculate=suffixes,
-                        reclaim_age=self.reclaim_age)
+                        df_mgr._get_hashes,
+                        job['device'], job['partition'], job['policy'],
+                        recalculate=suffixes)
                     self.logger.update_stats('suffix.hashes', hashed)
                     local_hash = recalc_hash
                     suffixes = [suffix for suffix in local_hash if
@@ -579,6 +572,7 @@ class ObjectReplicator(Daemon):
         using replication style storage policy
         """
         jobs = []
+        df_mgr = self._df_router[policy]
         self.all_devs_info.update(
             [(dev['replication_ip'], dev['device'])
              for dev in policy.object_ring.devs if dev])
@@ -605,7 +599,8 @@ class ObjectReplicator(Daemon):
                 self.logger.warning(
                     _('%s is not mounted'), local_dev['device'])
                 continue
-            unlink_older_than(tmp_path, time.time() - self.reclaim_age)
+            unlink_older_than(tmp_path, time.time() -
+                              df_mgr.reclaim_age)
             if not os.path.exists(obj_path):
                 try:
                     mkdirs(obj_path)
@@ -674,6 +669,19 @@ class ObjectReplicator(Daemon):
         jobs = []
         ips = whataremyips(self.bind_ip)
         for policy in POLICIES:
+            # Skip replication if next_part_power is set. In this case
+            # every object is hard-linked twice, but the replicator can't
+            # detect them and would create a second copy of the file if not
+            # yet existing - and this might double the actual transferred
+            # and stored data
+            next_part_power = getattr(
+                policy.object_ring, 'next_part_power', None)
+            if next_part_power is not None:
+                self.logger.warning(
+                    _("next_part_power set in policy '%s'. Skipping"),
+                    policy.name)
+                continue
+
             if policy.policy_type == REPL_POLICY:
                 if (override_policies is not None and
                         str(policy.idx) not in override_policies):
@@ -742,6 +750,7 @@ class ObjectReplicator(Daemon):
                     self.logger.info(_("Ring change detected. Aborting "
                                        "current replication pass."))
                     return
+
                 try:
                     if isfile(job['path']):
                         # Clean up any (probably zero-byte) files where a

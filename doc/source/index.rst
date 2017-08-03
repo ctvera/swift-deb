@@ -14,6 +14,7 @@
       License for the specific language governing permissions and limitations
       under the License.
 
+=================================
 Welcome to Swift's documentation!
 =================================
 
@@ -48,6 +49,7 @@ Overview and Concepts
     overview_policies
     overview_reaper
     overview_auth
+    overview_acl
     overview_replication
     ratelimit
     overview_large_objects
@@ -61,6 +63,7 @@ Overview and Concepts
     overview_encryption
     overview_backing_store
     ring_background
+    ring_partpower
     associated_projects
 
 Developer Documentation
@@ -90,11 +93,13 @@ Administrator Documentation
     replication_network
     logs
     ops_runbook/index
+    admin/index
+    install/index
 
 Object Storage v1 REST API Documentation
 ========================================
 
-See `Complete Reference for the Object Storage REST API <http://developer.openstack.org/api-ref-objectstorage-v1.html>`_
+See `Complete Reference for the Object Storage REST API <http://developer.openstack.org/api-ref/object-storage/>`_
 
 The following provides supporting information for the REST API:
 

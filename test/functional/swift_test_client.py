@@ -439,7 +439,7 @@ class Account(Base):
                 tree = minidom.parseString(self.conn.response.read())
                 for x in tree.getElementsByTagName('container'):
                     cont = {}
-                    for key in ['name', 'count', 'bytes']:
+                    for key in ['name', 'count', 'bytes', 'last_modified']:
                         cont[key] = x.getElementsByTagName(key)[0].\
                             childNodes[0].nodeValue
                     conts.append(cont)
@@ -482,8 +482,11 @@ class Account(Base):
         fields = [['object_count', 'x-account-object-count'],
                   ['container_count', 'x-account-container-count'],
                   ['bytes_used', 'x-account-bytes-used']]
+        optional_fields = [
+            ['temp-url-key', 'x-account-meta-temp-url-key'],
+            ['temp-url-key-2', 'x-account-meta-temp-url-key-2']]
 
-        return self.header_fields(fields)
+        return self.header_fields(fields, optional_fields=optional_fields)
 
     @property
     def path(self):
@@ -628,7 +631,12 @@ class Container(Base):
                                ['object_count', 'x-container-object-count'],
                                ['last_modified', 'last-modified']]
             optional_fields = [
+                # N.B. swift doesn't return both x-versions-location
+                # and x-history-location at a response so that this is safe
+                # using same variable "versions" for both and it means
+                # versioning is enabled.
                 ['versions', 'x-versions-location'],
+                ['versions', 'x-history-location'],
                 ['tempurl_key', 'x-container-meta-temp-url-key'],
                 ['tempurl_key2', 'x-container-meta-temp-url-key-2']]
 
@@ -894,12 +902,10 @@ class File(Base):
             fobj.close()
 
     def sync_metadata(self, metadata=None, cfg=None, parms=None):
-        if metadata is None:
-            metadata = {}
         if cfg is None:
             cfg = {}
 
-        self.metadata.update(metadata)
+        self.metadata = self.metadata if metadata is None else metadata
 
         if self.metadata:
             headers = self.make_headers(cfg=cfg)
