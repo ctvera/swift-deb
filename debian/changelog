@@ -1,8 +1,12 @@
 swift (2.15.0-1) UNRELEASED; urgency=medium
 
+  [ Ondřej Nový ]
   * New upstream release
   * Bump required version of (build-)depends for new upstream release
   * d/p/syslog_log_name.patch: rebase
+
+  [ Daniel Baumann ]
+  * Updating vcs fields.
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 03 Aug 2017 17:10:43 +0200
 
