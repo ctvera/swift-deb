@@ -11,6 +11,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
   * Updating copyright format url.
   * Updating maintainer field.
   * Running wrap-and-sort -bast.
+  * Updating standards version to 4.0.0.
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 03 Aug 2017 17:10:43 +0200
 
