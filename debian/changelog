@@ -9,6 +9,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
   [ Daniel Baumann ]
   * Updating vcs fields.
   * Updating copyright format url.
+  * Updating maintainer field.
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 03 Aug 2017 17:10:43 +0200
 
