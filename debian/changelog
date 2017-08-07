@@ -5,6 +5,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
   * Bump required version of (build-)depends for new upstream release
   * d/p/syslog_log_name.patch: rebase
   * Don't restart rsyslog in postrm/postinst, it's done by trigger
+  * d/copyright: Bump copyright years
 
   [ Daniel Baumann ]
   * Updating vcs fields.

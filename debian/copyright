@@ -3,15 +3,15 @@ Upstream-Name: swift
 Source: https://code.launchpad.net/swift
 
 Files: *
-Copyright: (c) 2010-2016, See AUTHORS file
+Copyright: (c) 2010-2017, See AUTHORS file
            (c) 2013 Hewlett-Packard Development Company, L.P.
            (c) 2010-2015 OpenStack Foundation
 License: Apache-2
 
 Files: debian/*
-Copyright: (c) 2010-2016, Thomas Goirand <zigo@debian.org>
+Copyright: (c) 2010-2017, Thomas Goirand <zigo@debian.org>
            (c) 2010-2012, Julien Danjou <acid@debian.org>
-           (c) 2015-2016, Ondřej Nový <onovy@debian.org>
+           (c) 2015-2017, Ondřej Nový <onovy@debian.org>
            (c) 2016, Marek Kaleta <marek.kaleta@firma.seznam.cz>
 License: Apache-2
 
