@@ -17,6 +17,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
     developers dotfiles.
   * Correcting permissions in debian packaging files.
   * Updating standards version to 4.0.1.
+  * Updating standards version to 4.1.0.
 
  -- Ondřej Nový <onovy@debian.org>  Thu, 03 Aug 2017 17:10:43 +0200
 
