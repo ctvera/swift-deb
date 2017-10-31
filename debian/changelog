@@ -10,6 +10,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
   * d/copyright: Bump copyright years
   * Install swift-object-relinker
   * Install guide is now part of main docs
+  * d/control: Don't depend on dh-systemd, it's not needed in new debhelper
 
   [ Daniel Baumann ]
   * Updating vcs fields.
