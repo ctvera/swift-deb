@@ -60,8 +60,6 @@ Depends:
  python-xattr (>= 0.4),
  ${misc:Depends},
  ${python:Depends},
-Provides:
- ${python:Provides},
 Breaks:
  swift-account (<< 2.6.0-2),
  swift-container (<< 2.6.0-2),
@@ -136,8 +134,6 @@ Depends:
  swift (=${binary:Version}),
  ${misc:Depends},
  ${python:Depends},
-Provides:
- ${python:Provides},
 Recommends:
  swift-drive-audit,
 Description: distributed virtual object store - account server
@@ -171,8 +167,6 @@ Depends:
  swift (=${binary:Version}),
  ${misc:Depends},
  ${python:Depends},
-Provides:
- ${python:Provides},
 Recommends:
  swift-drive-audit,
 Description: distributed virtual object store - container server
@@ -267,8 +261,6 @@ Depends:
  swift (=${binary:Version}),
  ${misc:Depends},
  ${python:Depends},
-Provides:
- ${python:Provides},
 Recommends:
  swift-drive-audit,
 Description: distributed virtual object store - object server
