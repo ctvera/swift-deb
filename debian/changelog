@@ -578,7 +578,7 @@ swift (1.3.0-1) unstable; urgency=low
 
 swift (1.3.0-0ubuntu1) natty; urgency=low
 
-  * New upstream release. 
+  * New upstream release.
 
  -- Chuck Short <zulcss@ubuntu.com>  Fri, 15 Apr 2011 08:25:53 -0400
 
@@ -590,7 +590,7 @@ swift (1.3-rc+bzr266-0ubuntu1) UNRELEASED; urgency=low
 
 swift (1.2.0+bzr208-0ubuntu1) natty; urgency=low
 
-  * New upstream release. 
+  * New upstream release.
 
  -- Chuck Short <zulcss@ubuntu.com>  Tue, 12 Apr 2011 10:32:30 -0400
 
@@ -654,7 +654,7 @@ swift (1.0.2-3) unstable; urgency=low
   * Add rsync and remove duplicate net-tools dependency.
   * Added Jay Payne to uploaders.
   * Added Greg Holt to uploaders.
-  * Updated VCS location to use UDD locations. 
+  * Updated VCS location to use UDD locations.
   * We actually depend on 1.0 of sphinx.
 
  -- Monty Taylor <mordred@inaugust.com>  Tue, 24 Aug 2010 00:02:00 -0700
