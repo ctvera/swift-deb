@@ -9,6 +9,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
   * Don't restart rsyslog in postrm/postinst, it's done by trigger
   * d/copyright: Bump copyright years
   * Install swift-object-relinker
+  * Install guide is now part of main docs
 
   [ Daniel Baumann ]
   * Updating vcs fields.
