@@ -25,6 +25,7 @@ CMDS=(
  'swift-object-reconstructor' 'swift-object-replicator' 'swift-object-server'
  'swift-object-updater' 'swift-oldies' 'swift-orphans' 'swift-proxy-server'
  'swift-recon' 'swift-reconciler-enqueue' 'swift-ring-builder-analyzer'
+ 'swift-object-relinker'
 )
 for cmd in "${CMDS[@]}"; do
     if ! $cmd -h 2>&1 > /dev/null; then
