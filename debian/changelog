@@ -11,6 +11,7 @@ swift (2.15.1-1) UNRELEASED; urgency=medium
   * Install swift-object-relinker
   * Install guide is now part of main docs
   * d/control: Don't depend on dh-systemd, it's not needed in new debhelper
+  * Use python3-sphinx for building docs
 
   [ Daniel Baumann ]
   * Updating vcs fields.
