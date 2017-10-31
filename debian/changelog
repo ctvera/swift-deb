@@ -8,6 +8,7 @@ swift (2.15.0-1) UNRELEASED; urgency=medium
     fix sqlite error
   * Don't restart rsyslog in postrm/postinst, it's done by trigger
   * d/copyright: Bump copyright years
+  * Install swift-object-relinker
 
   [ Daniel Baumann ]
   * Updating vcs fields.
