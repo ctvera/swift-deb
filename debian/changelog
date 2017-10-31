@@ -15,6 +15,7 @@ swift (2.15.1-1) experimental; urgency=medium
     - Remove deprecated ${python:Provides}
   * Use python3-sphinx for building docs
   * d/tests/help: Add swift-object-relinker
+  * Updating standards version to 4.1.1.
 
   [ Daniel Baumann ]
   * Updating vcs fields.
@@ -24,7 +25,6 @@ swift (2.15.1-1) experimental; urgency=medium
   * Removing gbp.conf, not used anymore or should be specified in the
     developers dotfiles.
   * Correcting permissions in debian packaging files.
-  * Updating standards version to 4.1.0.
 
  -- Ondřej Nový <onovy@debian.org>  Tue, 31 Oct 2017 14:43:03 +0100
 
