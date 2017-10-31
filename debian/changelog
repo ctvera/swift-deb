@@ -5,7 +5,7 @@ swift (2.15.1-1) experimental; urgency=medium
   * Bump required version of (build-)depends for new upstream release
   * d/p/syslog_log_name.patch: rebase
   * d/p/Be_more_tolerant_of_exception_messages_from_sqlite.patch:
-    fix sqlite error
+    fix sqlite error (Closes: #877298)
   * Don't restart rsyslog in postrm/postinst, it's done by trigger
   * d/copyright: Bump copyright years
   * Install swift-object-relinker
