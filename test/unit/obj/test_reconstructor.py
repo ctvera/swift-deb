@@ -3856,6 +3856,42 @@ class TestObjectReconstructor(BaseTestObjectReconstructor):
         # hashpath is still there, but it's empty
         self.assertEqual([], os.listdir(df._datadir))
 
+    def test_get_local_devices(self):
+        local_devs = self.reconstructor.get_local_devices()
+        self.assertEqual({'sda'}, local_devs)
+
+    @patch_policies(legacy_only=True)
+    def test_get_local_devices_with_no_ec_policy_env(self):
+        # even no ec_policy found on the server, it runs just like as
+        # no ec device found
+        self._configure_reconstructor()
+        self.assertEqual([], self.reconstructor.policies)
+        local_devs = self.reconstructor.get_local_devices()
+        self.assertEqual(set(), local_devs)
+
+    @patch_policies(legacy_only=True)
+    def test_reconstruct_with_no_ec_policy_env(self):
+        self._configure_reconstructor()
+        self.assertEqual([], self.reconstructor.policies)
+        collect_parts_results = []
+        _orig_collect_parts = self.reconstructor.collect_parts
+
+        def capture_collect_parts(**kwargs):
+            part_infos = _orig_collect_parts(**kwargs)
+            collect_parts_results.append(part_infos)
+            return part_infos
+
+        with mock.patch.object(self.reconstructor, 'collect_parts',
+                               capture_collect_parts):
+            self.reconstructor.reconstruct()
+
+        # There is one call, and it returns an empty list
+        self.assertEqual([[]], collect_parts_results)
+        log_lines = self.logger.all_log_lines()
+        self.assertEqual(log_lines, {'info': [mock.ANY]})
+        line = log_lines['info'][0]
+        self.assertTrue(line.startswith('Nothing reconstructed '), line)
+
 
 class TestReconstructFragmentArchive(BaseTestObjectReconstructor):
     obj_path = '/a/c/o'  # subclass overrides this
@@ -3928,6 +3964,7 @@ class TestReconstructFragmentArchive(BaseTestObjectReconstructor):
             self.assertEqual(
                 [{'timestamp': self.obj_timestamp.normal, 'exclude': []}],
                 json.loads(called_header['X-Backend-Fragment-Preferences']))
+            self.assertIn('X-Backend-Replication', called_header)
         # no error and warning
         self.assertFalse(self.logger.get_lines_for_level('error'))
         self.assertFalse(self.logger.get_lines_for_level('warning'))

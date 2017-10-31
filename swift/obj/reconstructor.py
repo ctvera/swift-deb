@@ -407,6 +407,7 @@ class ObjectReconstructor(Daemon):
         # need to be durable.
         headers = self.headers.copy()
         headers['X-Backend-Storage-Policy-Index'] = int(job['policy'])
+        headers['X-Backend-Replication'] = 'True'
         frag_prefs = [{'timestamp': datafile_metadata['X-Timestamp'],
                        'exclude': []}]
         headers['X-Backend-Fragment-Preferences'] = json.dumps(frag_prefs)
@@ -1034,7 +1035,7 @@ class ObjectReconstructor(Daemon):
         policy2devices = self.get_policy2devices()
         return reduce(set.union, (
             set(d['device'] for d in devices)
-            for devices in policy2devices.values()))
+            for devices in policy2devices.values()), set())
 
     def collect_parts(self, override_devices=None, override_partitions=None):
         """

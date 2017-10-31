@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import collections
 import email.parser
 import itertools
 import math
@@ -1609,8 +1610,109 @@ def capture_http_requests(get_response):
         yield fake_conn
 
 
+class ECObjectControllerMixin(BaseObjectControllerMixin):
+    # Add a few helper methods for EC tests.
+    def _make_ec_archive_bodies(self, test_body, policy=None):
+        policy = policy or self.policy
+        return encode_frag_archive_bodies(policy, test_body)
+
+    def _make_ec_object_stub(self, pattern='test', policy=None,
+                             timestamp=None):
+        policy = policy or self.policy
+        test_body = pattern * policy.ec_segment_size
+        test_body = test_body[:-random.randint(1, 1000)]
+        return make_ec_object_stub(test_body, policy, timestamp)
+
+    def _fake_ec_node_response(self, node_frags):
+        return fake_ec_node_response(node_frags, self.policy)
+
+    def test_GET_with_duplicate_but_sufficient_frag_indexes(self):
+        obj1 = self._make_ec_object_stub()
+        # proxy should ignore duplicated frag indexes and continue search for
+        # a set of unique indexes, finding last one on a handoff
+        node_frags = [
+            {'obj': obj1, 'frag': 0},
+            {'obj': obj1, 'frag': 0},  # duplicate frag
+            {'obj': obj1, 'frag': 1},
+            {'obj': obj1, 'frag': 1},  # duplicate frag
+            {'obj': obj1, 'frag': 2},
+            {'obj': obj1, 'frag': 2},  # duplicate frag
+            {'obj': obj1, 'frag': 3},
+            {'obj': obj1, 'frag': 3},  # duplicate frag
+            {'obj': obj1, 'frag': 4},
+            {'obj': obj1, 'frag': 4},  # duplicate frag
+            {'obj': obj1, 'frag': 10},
+            {'obj': obj1, 'frag': 11},
+            {'obj': obj1, 'frag': 12},
+            {'obj': obj1, 'frag': 13},
+        ] * self.policy.ec_duplication_factor
+        node_frags.append({'obj': obj1, 'frag': 5})  # first handoff
+
+        fake_response = self._fake_ec_node_response(node_frags)
+
+        req = swob.Request.blank('/v1/a/c/o')
+        with capture_http_requests(fake_response) as log:
+            resp = req.get_response(self.app)
+
+        self.assertEqual(resp.status_int, 200)
+        self.assertEqual(resp.headers['etag'], obj1['etag'])
+        self.assertEqual(md5(resp.body).hexdigest(), obj1['etag'])
+
+        # expect a request to all primaries plus one handoff
+        self.assertEqual(self.replicas() + 1, len(log))
+        collected_indexes = defaultdict(list)
+        for conn in log:
+            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
+            if fi is not None:
+                collected_indexes[fi].append(conn)
+        self.assertEqual(len(collected_indexes), self.policy.ec_ndata)
+
+    def test_GET_with_duplicate_but_insufficient_frag_indexes(self):
+        obj1 = self._make_ec_object_stub()
+        # proxy should ignore duplicated frag indexes and continue search for
+        # a set of unique indexes, but fails to find one
+        node_frags = [
+            {'obj': obj1, 'frag': 0},
+            {'obj': obj1, 'frag': 0},  # duplicate frag
+            {'obj': obj1, 'frag': 1},
+            {'obj': obj1, 'frag': 1},  # duplicate frag
+            {'obj': obj1, 'frag': 2},
+            {'obj': obj1, 'frag': 2},  # duplicate frag
+            {'obj': obj1, 'frag': 3},
+            {'obj': obj1, 'frag': 3},  # duplicate frag
+            {'obj': obj1, 'frag': 4},
+            {'obj': obj1, 'frag': 4},  # duplicate frag
+            {'obj': obj1, 'frag': 10},
+            {'obj': obj1, 'frag': 11},
+            {'obj': obj1, 'frag': 12},
+            {'obj': obj1, 'frag': 13},
+        ]
+
+        # ... and the rests are 404s which is limited by request_count
+        # (2 * replicas in default) rather than max_extra_requests limitation
+        # because the retries will be in ResumingGetter if the responses
+        # are 404s
+        node_frags += [[]] * (self.replicas() * 2 - len(node_frags))
+        fake_response = self._fake_ec_node_response(node_frags)
+
+        req = swob.Request.blank('/v1/a/c/o')
+        with capture_http_requests(fake_response) as log:
+            resp = req.get_response(self.app)
+
+        self.assertEqual(resp.status_int, 404)
+
+        # expect a request to all nodes
+        self.assertEqual(2 * self.replicas(), len(log))
+        collected_indexes = defaultdict(list)
+        for conn in log:
+            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
+            if fi is not None:
+                collected_indexes[fi].append(conn)
+        self.assertEqual(len(collected_indexes), self.policy.ec_ndata - 1)
+
+
 @patch_policies(with_ec_default=True)
-class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
+class TestECObjController(ECObjectControllerMixin, unittest.TestCase):
     container_info = {
         'status': 200,
         'read_acl': None,
@@ -2374,18 +2476,6 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
             resp = req.get_response(self.app)
         self.assertEqual(resp.status_int, 201)
 
-    def _make_ec_archive_bodies(self, test_body, policy=None):
-        policy = policy or self.policy
-        return encode_frag_archive_bodies(policy, test_body)
-
-    def _make_ec_object_stub(self, test_body=None, policy=None,
-                             timestamp=None):
-        policy = policy or self.policy
-        return make_ec_object_stub(test_body, policy, timestamp)
-
-    def _fake_ec_node_response(self, node_frags):
-        return fake_ec_node_response(node_frags, self.policy)
-
     def test_GET_with_frags_swapped_around(self):
         segment_size = self.policy.ec_segment_size
         test_data = ('test' * segment_size)[:-657]
@@ -2490,8 +2580,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                          len(collected_responses[obj1['etag']]))
 
     def test_GET_with_single_missed_overwrite_does_not_need_handoff(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
 
         node_frags = [
             {'obj': obj2, 'frag': 0},
@@ -2540,8 +2630,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                                      len(frags), etag))
 
     def test_GET_with_many_missed_overwrite_will_need_handoff(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
 
         node_frags = [
             {'obj': obj2, 'frag': 0},
@@ -2591,8 +2681,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                                      len(frags), etag))
 
     def test_GET_with_missing_and_mixed_frags_will_dig_deep_but_succeed(self):
-        obj1 = self._make_ec_object_stub(timestamp=self.ts())
-        obj2 = self._make_ec_object_stub(timestamp=self.ts())
+        obj1 = self._make_ec_object_stub(pattern='obj1', timestamp=self.ts())
+        obj2 = self._make_ec_object_stub(pattern='obj2', timestamp=self.ts())
 
         node_frags = [
             {'obj': obj1, 'frag': 0},
@@ -2654,8 +2744,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                                      len(frags), etag))
 
     def test_GET_with_missing_and_mixed_frags_will_dig_deep_but_stop(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
 
         node_frags = [
             {'obj': obj1, 'frag': 0},
@@ -2715,47 +2805,6 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                                  'collected %s frags for etag %s' % (
                                      len(frags), etag))
 
-    def test_GET_with_duplicate_but_sufficient_frag_indexes(self):
-        obj1 = self._make_ec_object_stub()
-        # proxy should ignore duplicated frag indexes and continue search for
-        # a set of unique indexes, finding last one on a handoff
-        node_frags = [
-            {'obj': obj1, 'frag': 0},
-            {'obj': obj1, 'frag': 0},  # duplicate frag
-            {'obj': obj1, 'frag': 1},
-            {'obj': obj1, 'frag': 1},  # duplicate frag
-            {'obj': obj1, 'frag': 2},
-            {'obj': obj1, 'frag': 2},  # duplicate frag
-            {'obj': obj1, 'frag': 3},
-            {'obj': obj1, 'frag': 3},  # duplicate frag
-            {'obj': obj1, 'frag': 4},
-            {'obj': obj1, 'frag': 4},  # duplicate frag
-            {'obj': obj1, 'frag': 10},
-            {'obj': obj1, 'frag': 11},
-            {'obj': obj1, 'frag': 12},
-            {'obj': obj1, 'frag': 13},
-            {'obj': obj1, 'frag': 5},  # handoff
-        ]
-
-        fake_response = self._fake_ec_node_response(node_frags)
-
-        req = swob.Request.blank('/v1/a/c/o')
-        with capture_http_requests(fake_response) as log:
-            resp = req.get_response(self.app)
-
-        self.assertEqual(resp.status_int, 200)
-        self.assertEqual(resp.headers['etag'], obj1['etag'])
-        self.assertEqual(md5(resp.body).hexdigest(), obj1['etag'])
-
-        # expect a request to all primaries plus one handoff
-        self.assertEqual(self.replicas() + 1, len(log))
-        collected_indexes = defaultdict(list)
-        for conn in log:
-            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
-            if fi is not None:
-                collected_indexes[fi].append(conn)
-        self.assertEqual(len(collected_indexes), self.policy.ec_ndata)
-
     def test_GET_with_duplicate_and_hidden_frag_indexes(self):
         obj1 = self._make_ec_object_stub()
         # proxy should ignore duplicated frag indexes and continue search for
@@ -2799,51 +2848,9 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
                 collected_indexes[fi].append(conn)
         self.assertEqual(len(collected_indexes), self.policy.ec_ndata)
 
-    def test_GET_with_duplicate_but_insufficient_frag(self):
-        obj1 = self._make_ec_object_stub()
-        # proxy should ignore duplicated frag indexes and continue search for
-        # a set of unique indexes, but fails to find one
-        node_frags = [
-            {'obj': obj1, 'frag': 0},
-            {'obj': obj1, 'frag': 0},  # duplicate frag
-            {'obj': obj1, 'frag': 1},
-            {'obj': obj1, 'frag': 1},  # duplicate frag
-            {'obj': obj1, 'frag': 2},
-            {'obj': obj1, 'frag': 2},  # duplicate frag
-            {'obj': obj1, 'frag': 3},
-            {'obj': obj1, 'frag': 3},  # duplicate frag
-            {'obj': obj1, 'frag': 4},
-            {'obj': obj1, 'frag': 4},  # duplicate frag
-            {'obj': obj1, 'frag': 10},
-            {'obj': obj1, 'frag': 11},
-            {'obj': obj1, 'frag': 12},
-            {'obj': obj1, 'frag': 13},
-        ] + [[]] * 14  # 404 from handoffs
-
-        fake_response = self._fake_ec_node_response(node_frags)
-
-        req = swob.Request.blank('/v1/a/c/o')
-        with capture_http_requests(fake_response) as log:
-            resp = req.get_response(self.app)
-
-        self.assertEqual(resp.status_int, 404)
-
-        # expect a request to all nodes
-        self.assertEqual(2 * self.replicas(), len(log))
-        collected_indexes = defaultdict(list)
-        collected_etags = set()
-        for conn in log:
-            etag = conn.resp.headers['X-Object-Sysmeta-Ec-Etag']
-            collected_etags.add(etag)  # will be None from handoffs
-            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
-            if fi is not None:
-                collected_indexes[fi].append(conn)
-        self.assertEqual(len(collected_indexes), self.policy.ec_ndata - 1)
-        self.assertEqual({obj1['etag'], None}, collected_etags)
-
     def test_GET_with_missing_and_mixed_frags_may_503(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
         # we get a 503 when all the handoffs return 200
         node_frags = [[]] * self.replicas()  # primaries have no frags
         node_frags = node_frags + [  # handoffs all have frags
@@ -2882,10 +2889,10 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         # all nodes have a frag but there is no one set that reaches quorum,
         # which means there is no backend 404 response, but proxy should still
         # return 404 rather than 503
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
-        obj3 = self._make_ec_object_stub()
-        obj4 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
+        obj3 = self._make_ec_object_stub(pattern='obj3')
+        obj4 = self._make_ec_object_stub(pattern='obj4')
 
         node_frags = [
             {'obj': obj1, 'frag': 0},
@@ -3056,8 +3063,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         self.assertEqual(28, len(log))
 
     def test_GET_with_missing_durable_files_and_mixed_etags(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
 
         # non-quorate durables for another object won't stop us finding the
         # quorate object
@@ -3146,8 +3153,10 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         # At that point (or before) the proxy knows that a durable set of
         # frags for obj2 exists so will fetch them, requiring another 10
         # directed requests.
-        obj2 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
-        obj1 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
+        obj2 = self._make_ec_object_stub(pattern='obj2',
+                                         timestamp=self._ts_iter.next())
+        obj1 = self._make_ec_object_stub(pattern='obj1',
+                                         timestamp=self._ts_iter.next())
 
         node_frags = [
             [{'obj': obj1, 'frag': 0, 'durable': False}],  # obj2 missing
@@ -3196,9 +3205,12 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         # GETs to see all the obj3 frags plus 1 more to GET a durable frag.
         # The proxy may also do one more GET if the obj2 frag is found.
         # i.e. 10 + 1 durable for obj3, 2 for obj1 and 1 more if obj2 found
-        obj2 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
-        obj3 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
-        obj1 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
+        obj2 = self._make_ec_object_stub(pattern='obj2',
+                                         timestamp=self._ts_iter.next())
+        obj3 = self._make_ec_object_stub(pattern='obj3',
+                                         timestamp=self._ts_iter.next())
+        obj1 = self._make_ec_object_stub(pattern='obj1',
+                                         timestamp=self._ts_iter.next())
 
         node_frags = [
             [{'obj': obj1, 'frag': 0, 'durable': False},  # obj1 frag
@@ -3236,8 +3248,10 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         # scenario: non-durable frags of newer obj1 obscure all frags
         # of older obj2, so first 28 requests result in a non-durable set.
         # There are only 10 frags for obj2 and one is not durable.
-        obj2 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
-        obj1 = self._make_ec_object_stub(timestamp=self._ts_iter.next())
+        obj2 = self._make_ec_object_stub(pattern='obj2',
+                                         timestamp=self._ts_iter.next())
+        obj1 = self._make_ec_object_stub(pattern='obj1',
+                                         timestamp=self._ts_iter.next())
 
         node_frags = [
             [{'obj': obj1, 'frag': 0, 'durable': False}],  # obj2 missing
@@ -3286,8 +3300,8 @@ class TestECObjController(BaseObjectControllerMixin, unittest.TestCase):
         # fragments for different content at the same timestamp then the
         # object controller should handle it gracefully
         ts = self.ts()  # force equal timestamps for two objects
-        obj1 = self._make_ec_object_stub(timestamp=ts, test_body='obj1')
-        obj2 = self._make_ec_object_stub(timestamp=ts, test_body='obj2')
+        obj1 = self._make_ec_object_stub(timestamp=ts, pattern='obj1')
+        obj2 = self._make_ec_object_stub(timestamp=ts, pattern='obj2')
         self.assertNotEqual(obj1['etag'], obj2['etag'])  # sanity
 
         node_frags = [
@@ -3919,7 +3933,7 @@ class TestECFunctions(unittest.TestCase):
                  StoragePolicy(1, name='unu')],
                 fake_ring_args=[{'replicas': 28}, {}])
 class TestECDuplicationObjController(
-        BaseObjectControllerMixin, unittest.TestCase):
+        ECObjectControllerMixin, unittest.TestCase):
     container_info = {
         'status': 200,
         'read_acl': None,
@@ -3930,18 +3944,6 @@ class TestECDuplicationObjController(
     }
 
     controller_cls = obj.ECObjectController
-
-    def _make_ec_object_stub(self, test_body=None, policy=None,
-                             timestamp=None):
-        policy = policy or self.policy
-        return make_ec_object_stub(test_body, policy, timestamp)
-
-    def _make_ec_archive_bodies(self, test_body, policy=None):
-        policy = policy or self.policy
-        return encode_frag_archive_bodies(policy, test_body)
-
-    def _fake_ec_node_response(self, node_frags):
-        return fake_ec_node_response(node_frags, self.policy)
 
     def _test_GET_with_duplication_factor(self, node_frags, obj):
         # This is basic tests in the healthy backends status
@@ -4034,8 +4036,8 @@ class TestECDuplicationObjController(
         self._test_GET_with_duplication_factor(node_frags, obj)
 
     def test_GET_with_missing_and_mixed_frags_will_dig_deep_but_stop(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
 
         # both of obj1 and obj2 has only 9 frags which is not able to decode
         node_frags = [
@@ -4080,7 +4082,8 @@ class TestECDuplicationObjController(
         # default node_iter will exhaust to the last of handoffs
         self.assertEqual(len(log), self.replicas() * 2)
         # we have obj1, obj2, and 404 NotFound in collected_responses
-        self.assertEqual(len(collected_responses), 3)
+        self.assertEqual(sorted([obj1['etag'], obj2['etag'], None]),
+                         sorted(collected_responses.keys()))
 
         # ... regardless we should never need to fetch more than ec_ndata
         # frags for any given etag
@@ -4089,52 +4092,9 @@ class TestECDuplicationObjController(
                                  'collected %s frags for etag %s' % (
                                      len(frags), etag))
 
-    def test_GET_with_duplicate_but_insufficient_frag(self):
-        obj1 = self._make_ec_object_stub()
-        # proxy should ignore duplicated frag indexes and continue search for
-        # a set of unique indexes, but fails to find one
-        node_frags = [
-            {'obj': obj1, 'frag': 0},
-            {'obj': obj1, 'frag': 0},  # duplicate frag
-            {'obj': obj1, 'frag': 1},
-            {'obj': obj1, 'frag': 1},  # duplicate frag
-            {'obj': obj1, 'frag': 2},
-            {'obj': obj1, 'frag': 2},  # duplicate frag
-            {'obj': obj1, 'frag': 3},
-            {'obj': obj1, 'frag': 3},  # duplicate frag
-            {'obj': obj1, 'frag': 4},
-            {'obj': obj1, 'frag': 4},  # duplicate frag
-            {'obj': obj1, 'frag': 10},
-            {'obj': obj1, 'frag': 11},
-            {'obj': obj1, 'frag': 12},
-            {'obj': obj1, 'frag': 13},
-        ]
-
-        # ... and the rests are 404s which is limited by request_count
-        # (2 * replicas in default) rather than max_extra_requests limitation
-        # because the retries will be in ResumingGetter if the responses
-        # are 404s
-        node_frags += [[]] * (self.replicas() * 2 - len(node_frags))
-        fake_response = self._fake_ec_node_response(node_frags)
-
-        req = swob.Request.blank('/v1/a/c/o')
-        with capture_http_requests(fake_response) as log:
-            resp = req.get_response(self.app)
-
-        self.assertEqual(resp.status_int, 404)
-
-        # expect a request to all nodes
-        self.assertEqual(2 * self.replicas(), len(log))
-        collected_indexes = defaultdict(list)
-        for conn in log:
-            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
-            if fi is not None:
-                collected_indexes[fi].append(conn)
-        self.assertEqual(len(collected_indexes), self.policy.ec_ndata - 1)
-
     def test_GET_with_many_missed_overwrite_will_need_handoff(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
         # primaries
         node_frags = [
             {'obj': obj2, 'frag': 0},
@@ -4189,57 +4149,11 @@ class TestECDuplicationObjController(
                                  'collected %s frags for etag %s' % (
                                  len(frags), etag))
 
-    def test_GET_with_duplicate_but_sufficient_frag_indexes(self):
-        obj1 = self._make_ec_object_stub()
-        # proxy should ignore duplicated frag indexes and continue search for
-        # a set of unique indexes, finding last one on a handoff
-        node_frags = [
-            {'obj': obj1, 'frag': 0},
-            {'obj': obj1, 'frag': 0},  # duplicate frag
-            {'obj': obj1, 'frag': 1},
-            {'obj': obj1, 'frag': 1},  # duplicate frag
-            {'obj': obj1, 'frag': 2},
-            {'obj': obj1, 'frag': 2},  # duplicate frag
-            {'obj': obj1, 'frag': 3},
-            {'obj': obj1, 'frag': 3},  # duplicate frag
-            {'obj': obj1, 'frag': 4},
-            {'obj': obj1, 'frag': 4},  # duplicate frag
-            {'obj': obj1, 'frag': 10},
-            {'obj': obj1, 'frag': 11},
-            {'obj': obj1, 'frag': 12},
-            {'obj': obj1, 'frag': 13},
-        ]
-
-        # proxy will access randomly to a node in the second set
-        # so to ensure the GET fragment meets what it needs.
-        node_frags += [{'obj': obj1, 'frag': 5}]
-        # rests are 404s
-        node_frags += [[]] * (self.replicas() - len(node_frags))
-
-        fake_response = self._fake_ec_node_response(node_frags)
-
-        req = swob.Request.blank('/v1/a/c/o')
-        with capture_http_requests(fake_response) as log:
-            resp = req.get_response(self.app)
-
-        self.assertEqual(resp.status_int, 200)
-        self.assertEqual(resp.headers['etag'], obj1['etag'])
-        self.assertEqual(md5(resp.body).hexdigest(), obj1['etag'])
-
-        # expect a request to all primaries plus one handoff
-        self.assertGreaterEqual(
-            len(log), self.policy.ec_n_unique_fragments + 1)
-        self.assertLessEqual(len(log), self.replicas())
-        collected_indexes = defaultdict(list)
-        for conn in log:
-            fi = conn.resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
-            if fi is not None:
-                collected_indexes[fi].append(conn)
-        self.assertEqual(len(collected_indexes), self.policy.ec_ndata)
-
     def test_GET_with_missing_and_mixed_frags_will_dig_deep_but_succeed(self):
-        obj1 = self._make_ec_object_stub(timestamp=self.ts())
-        obj2 = self._make_ec_object_stub(timestamp=self.ts())
+        obj1 = self._make_ec_object_stub(pattern='obj1',
+                                         timestamp=self.ts())
+        obj2 = self._make_ec_object_stub(pattern='obj2',
+                                         timestamp=self.ts())
 
         # 28 nodes are here
         node_frags = [
@@ -4310,13 +4224,17 @@ class TestECDuplicationObjController(
         # all nodes have a frag but there is no one set that reaches quorum,
         # which means there is no backend 404 response, but proxy should still
         # return 404 rather than 503
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
-        obj3 = self._make_ec_object_stub()
-        obj4 = self._make_ec_object_stub()
-        obj5 = self._make_ec_object_stub()
-        obj6 = self._make_ec_object_stub()
-        obj7 = self._make_ec_object_stub()
+        stub_objects = [
+            self._make_ec_object_stub(pattern='obj1'),
+            self._make_ec_object_stub(pattern='obj2'),
+            self._make_ec_object_stub(pattern='obj3'),
+            self._make_ec_object_stub(pattern='obj4'),
+            self._make_ec_object_stub(pattern='obj5'),
+            self._make_ec_object_stub(pattern='obj6'),
+            self._make_ec_object_stub(pattern='obj7'),
+        ]
+        etags = collections.Counter(stub['etag'] for stub in stub_objects)
+        self.assertEqual(len(etags), 7, etags)  # sanity
 
         # primaries and handoffs for required nodes
         # this is 10-4 * 2 case so that 56 requests (2 * replicas) required
@@ -4326,7 +4244,7 @@ class TestECDuplicationObjController(
         # fill them out to the primary and handoff nodes
         node_frags = []
         for frag in range(8):
-            for stub_obj in (obj1, obj2, obj3, obj4, obj5, obj6, obj7):
+            for stub_obj in stub_objects:
                 if len(node_frags) >= required_nodes:
                     # we already have enough responses
                     break
@@ -4390,10 +4308,10 @@ class TestECDuplicationObjController(
         self.assertEqual(self.replicas() * 2, len(log))
 
     def test_GET_with_missing_and_mixed_frags_may_503(self):
-        obj1 = self._make_ec_object_stub()
-        obj2 = self._make_ec_object_stub()
-        obj3 = self._make_ec_object_stub()
-        obj4 = self._make_ec_object_stub()
+        obj1 = self._make_ec_object_stub(pattern='obj1')
+        obj2 = self._make_ec_object_stub(pattern='obj2')
+        obj3 = self._make_ec_object_stub(pattern='obj3')
+        obj4 = self._make_ec_object_stub(pattern='obj4')
         # we get a 503 when all the handoffs return 200
         node_frags = [[]] * self.replicas()  # primaries have no frags
         # plus, 4 different objects and 7 indexes will b 28 node responses
@@ -4449,8 +4367,8 @@ class TestECDuplicationObjController(
         # the difference from parent class is only handoff stub length
 
         ts = self.ts()  # force equal timestamps for two objects
-        obj1 = self._make_ec_object_stub(timestamp=ts, test_body='obj1')
-        obj2 = self._make_ec_object_stub(timestamp=ts, test_body='obj2')
+        obj1 = self._make_ec_object_stub(timestamp=ts, pattern='obj1')
+        obj2 = self._make_ec_object_stub(timestamp=ts, pattern='obj2')
         self.assertNotEqual(obj1['etag'], obj2['etag'])  # sanity
 
         node_frags = [
