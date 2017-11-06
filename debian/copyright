@@ -5,7 +5,7 @@ Source: https://code.launchpad.net/swift
 Files: *
 Copyright: (c) 2010-2017, See AUTHORS file
            (c) 2013 Hewlett-Packard Development Company, L.P.
-           (c) 2010-2015 OpenStack Foundation
+           (c) 2010-2017 OpenStack Foundation
 License: Apache-2
 
 Files: debian/*
@@ -51,6 +51,19 @@ Copyright: (c) 2011-2014 Greg Holt
            (c) 2013 Shri Javadekar
            (c) 2013 Tong Li
            (c) 2013 ZhiQiang Fan
+License: Apache-2
+
+Files: bin/swift-ring-builder
+       bin/swift-recon
+       test/unit/cli/test_ringbuilder.py
+       test/unit/cli/test_recon.py
+Copyright: (c) 2013-2014 Christian Schwede <christian.schwede@enovance.com>
+License: Apache-2
+
+Files: bin/swift-ring-builder-analyzer
+       test/unit/cli/test_ring_builder_analyzer.py
+       test/unit/cli/test_form_signature.py
+Copyright: (c) 2014-2015 Samuel Merritt <sam@swiftstack.com>
 License: Apache-2
 
 License: Apache-2
