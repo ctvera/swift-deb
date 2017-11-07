@@ -102,10 +102,6 @@ def start_response(*args):
 
 @patch_policies([StoragePolicy(0, 'zero', False)])
 class TestProxyLogging(unittest.TestCase):
-
-    def setUp(self):
-        pass
-
     def _log_parts(self, app, should_be_empty=False):
         info_calls = app.access_logger.log_dict['info']
         if should_be_empty:
@@ -455,8 +451,8 @@ class TestProxyLogging(unittest.TestCase):
         headers = unquote(log_parts[14]).split('\n')
         self.assertTrue('First: 1' in headers)
         self.assertTrue('Second: 2' in headers)
-        self.assertTrue('Third: 3' not in headers)
-        self.assertTrue('Host: localhost:80' not in headers)
+        self.assertNotIn('Third: 3', headers)
+        self.assertNotIn('Host: localhost:80', headers)
 
     def test_upload_size(self):
         # Using default policy
@@ -1035,7 +1031,3 @@ class TestProxyLogging(unittest.TestCase):
             ''.join(resp)
         log_parts = self._log_parts(app)
         self.assertEqual(log_parts[20], '1')
-
-
-if __name__ == '__main__':
-    unittest.main()

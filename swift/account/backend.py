@@ -254,7 +254,7 @@ class AccountBroker(DatabaseBroker):
         :param bytes_used: number of bytes used by the container
         :param storage_policy_index:  the storage policy for this container
         """
-        if delete_timestamp > put_timestamp and \
+        if Timestamp(delete_timestamp) > Timestamp(put_timestamp) and \
                 object_count in (None, '', 0, '0'):
             deleted = 1
         else:
@@ -379,7 +379,8 @@ class AccountBroker(DatabaseBroker):
         :param delimiter: delimiter for query
         :param reverse: reverse the result order.
 
-        :returns: list of tuples of (name, object_count, bytes_used, 0)
+        :returns: list of tuples of (name, object_count, bytes_used,
+                  put_timestamp, 0)
         """
         delim_force_gte = False
         (marker, end_marker, prefix, delimiter) = utf8encode(
@@ -397,7 +398,7 @@ class AccountBroker(DatabaseBroker):
             results = []
             while len(results) < limit:
                 query = """
-                    SELECT name, object_count, bytes_used, 0
+                    SELECT name, object_count, bytes_used, put_timestamp, 0
                     FROM container
                     WHERE """
                 query_args = []
@@ -459,7 +460,7 @@ class AccountBroker(DatabaseBroker):
                             delim_force_gte = True
                         dir_name = name[:end + 1]
                         if dir_name != orig_marker:
-                            results.append([dir_name, 0, 0, 1])
+                            results.append([dir_name, 0, 0, '0', 1])
                         curs.close()
                         break
                     results.append(row)
@@ -501,12 +502,14 @@ class AccountBroker(DatabaseBroker):
                     for i in range(5):
                         if record[i] is None and row[i] is not None:
                             record[i] = row[i]
-                    if row[1] > record[1]:  # Keep newest put_timestamp
+                    if Timestamp(row[1]) > \
+                       Timestamp(record[1]):  # Keep newest put_timestamp
                         record[1] = row[1]
-                    if row[2] > record[2]:  # Keep newest delete_timestamp
+                    if Timestamp(row[2]) > \
+                       Timestamp(record[2]):  # Keep newest delete_timestamp
                         record[2] = row[2]
                     # If deleted, mark as such
-                    if record[2] > record[1] and \
+                    if Timestamp(record[2]) > Timestamp(record[1]) and \
                             record[3] in (None, '', 0, '0'):
                         record[5] = 1
                     else:

@@ -53,6 +53,7 @@ import six.moves.cPickle as pickle
 from gzip import GzipFile
 import mock as mocklib
 import inspect
+from nose import SkipTest
 
 EMPTY_ETAG = md5().hexdigest()
 
@@ -199,6 +200,7 @@ class PatchPolicies(object):
     def __enter__(self):
         self._orig_POLICIES = storage_policy._POLICIES
         storage_policy._POLICIES = self.policies
+        self._setup_rings()
 
     def __exit__(self, *args):
         storage_policy._POLICIES = self._orig_POLICIES
@@ -997,6 +999,7 @@ def fake_http_connect(*code_iter, **kwargs):
     body_iter = kwargs.get('body_iter', None)
     if body_iter:
         body_iter = iter(body_iter)
+    unexpected_requests = []
 
     def connect(*args, **ckwargs):
         if kwargs.get('slow_connect', False):
@@ -1006,7 +1009,15 @@ def fake_http_connect(*code_iter, **kwargs):
                 kwargs['give_content_type'](args[6]['Content-Type'])
             else:
                 kwargs['give_content_type']('')
-        i, status = next(conn_id_and_code_iter)
+        try:
+            i, status = next(conn_id_and_code_iter)
+        except StopIteration:
+            # the code under test may swallow the StopIteration, so by logging
+            # unexpected requests here we allow the test framework to check for
+            # them after the connect function has been used.
+            unexpected_requests.append((args, kwargs))
+            raise
+
         if 'give_connect' in kwargs:
             give_conn_fn = kwargs['give_connect']
             argspec = inspect.getargspec(give_conn_fn)
@@ -1029,6 +1040,7 @@ def fake_http_connect(*code_iter, **kwargs):
                         connection_id=i, give_send=kwargs.get('give_send'),
                         give_expect=kwargs.get('give_expect'))
 
+    connect.unexpected_requests = unexpected_requests
     connect.code_iter = code_iter
 
     return connect
@@ -1079,3 +1091,41 @@ class Timeout(object):
         class TimeoutException(Exception):
             pass
         raise TimeoutException
+
+
+def requires_o_tmpfile_support(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if not utils.o_tmpfile_supported():
+            raise SkipTest('Requires O_TMPFILE support')
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def encode_frag_archive_bodies(policy, body):
+    """
+    Given a stub body produce a list of complete frag_archive bodies as
+    strings in frag_index order.
+
+    :param policy: a StoragePolicy instance, with policy_type EC_POLICY
+    :param body: a string, the body to encode into frag archives
+
+    :returns: list of strings, the complete frag_archive bodies for the given
+              plaintext
+    """
+    segment_size = policy.ec_segment_size
+    # split up the body into buffers
+    chunks = [body[x:x + segment_size]
+              for x in range(0, len(body), segment_size)]
+    # encode the buffers into fragment payloads
+    fragment_payloads = []
+    for chunk in chunks:
+        fragments = policy.pyeclib_driver.encode(chunk)
+        if not fragments:
+            break
+        fragment_payloads.append(fragments)
+
+    # join up the fragment payloads per node
+    ec_archive_bodies = [''.join(frags)
+                         for frags in zip(*fragment_payloads)]
+    return ec_archive_bodies

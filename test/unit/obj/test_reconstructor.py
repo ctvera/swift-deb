@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import itertools
+import json
 import unittest
 import os
 from hashlib import md5
@@ -41,6 +42,7 @@ from swift.obj.reconstructor import REVERT
 from test.unit import (patch_policies, debug_logger, mocked_http_conn,
                        FabricatedRing, make_timestamp_iter,
                        DEFAULT_TEST_EC_TYPE)
+from test.unit.obj.common import write_diskfile
 
 
 @contextmanager
@@ -136,6 +138,8 @@ def get_header_frag_index(self, body):
                                  ec_type=DEFAULT_TEST_EC_TYPE,
                                  ec_ndata=2, ec_nparity=1)])
 class TestGlobalSetupObjectReconstructor(unittest.TestCase):
+    # Tests for reconstructor using real objects in test partition directories.
+    legacy_durable = False
 
     def setUp(self):
         self.testdir = tempfile.mkdtemp()
@@ -174,22 +178,16 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
         # most of the reconstructor test methods require that there be
         # real objects in place, not just part dirs, so we'll create them
         # all here....
-        # part 0: 3C1/hash/xxx-1.data  <-- job: sync_only - parnters (FI 1)
-        #                 /xxx.durable <-- included in earlier job (FI 1)
-        #         061/hash/xxx-1.data  <-- included in earlier job (FI 1)
-        #                 /xxx.durable <-- included in earlier job (FI 1)
-        #                 /xxx-2.data  <-- job: sync_revert to index 2
+        # part 0: 3C1/hash/xxx#1#d.data  <-- job: sync_only - partners (FI 1)
+        #         061/hash/xxx#1#d.data  <-- included in earlier job (FI 1)
+        #                 /xxx#2#d.data  <-- job: sync_revert to index 2
 
-        # part 1: 3C1/hash/xxx-0.data  <-- job: sync_only - parnters (FI 0)
-        #                 /xxx-1.data  <-- job: sync_revert to index 1
-        #                 /xxx.durable <-- included in earlier jobs (FI 0, 1)
-        #         061/hash/xxx-1.data  <-- included in earlier job (FI 1)
-        #                 /xxx.durable <-- included in earlier job (FI 1)
+        # part 1: 3C1/hash/xxx#0#d.data  <-- job: sync_only - partners (FI 0)
+        #                 /xxx#1#d.data  <-- job: sync_revert to index 1
+        #         061/hash/xxx#1#d.data  <-- included in earlier job (FI 1)
 
-        # part 2: 3C1/hash/xxx-2.data  <-- job: sync_revert to index 2
-        #                 /xxx.durable <-- included in earlier job (FI 2)
-        #         061/hash/xxx-0.data  <-- job: sync_revert to index 0
-        #                 /xxx.durable <-- included in earlier job (FI 0)
+        # part 2: 3C1/hash/xxx#2#d.data  <-- job: sync_revert to index 2
+        #         061/hash/xxx#0#d.data  <-- job: sync_revert to index 0
 
         def _create_frag_archives(policy, obj_path, local_id, obj_set):
             # we'll create 2 sets of objects in different suffix dirs
@@ -202,7 +200,7 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
                     # just the local
                     return local_id
                 else:
-                    # onde local and all of another
+                    # one local and all of another
                     if obj_num == 0:
                         return local_id
                     else:
@@ -239,7 +237,7 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
                     timestamp=utils.Timestamp(t))
 
             for part_num in self.part_nums:
-                # create 3 unique objcets per part, each part
+                # create 3 unique objects per part, each part
                 # will then have a unique mix of FIs for the
                 # possible scenarios
                 for obj_num in range(0, 3):
@@ -285,18 +283,10 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
         df_mgr = self.reconstructor._df_router[policy]
         df = df_mgr.get_diskfile('sda1', part, 'a', 'c', object_name,
                                  policy=policy)
-        with df.create() as writer:
-            timestamp = timestamp or utils.Timestamp(time.time())
-            test_data = test_data or 'test data'
-            writer.write(test_data)
-            metadata = {
-                'X-Timestamp': timestamp.internal,
-                'Content-Length': len(test_data),
-                'Etag': md5(test_data).hexdigest(),
-                'X-Object-Sysmeta-Ec-Frag-Index': frag_index,
-            }
-            writer.put(metadata)
-            writer.commit(timestamp)
+        timestamp = timestamp or utils.Timestamp(time.time())
+        test_data = test_data or 'test data'
+        write_diskfile(df, timestamp, data=test_data, frag_index=frag_index,
+                       legacy_durable=self.legacy_durable)
         return df
 
     def assert_expected_jobs(self, part_num, jobs):
@@ -635,7 +625,8 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
             stat_line = line.split('of', 1)[0].strip()
             stats_lines.add(stat_line)
         acceptable = set([
-            '0/3 (0.00%) partitions',
+            '3/8 (37.50%) partitions',
+            '5/8 (62.50%) partitions',
             '8/8 (100.00%) partitions',
         ])
         matched = stats_lines & acceptable
@@ -728,7 +719,6 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
         rmtree(testring, ignore_errors=1)
 
     def test_build_reconstruction_jobs(self):
-        self.reconstructor.handoffs_first = False
         self.reconstructor._reset_stats()
         for part_info in self.reconstructor.collect_parts():
             jobs = self.reconstructor.build_reconstruction_jobs(part_info)
@@ -737,13 +727,40 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
                              object_reconstructor.REVERT))
             self.assert_expected_jobs(part_info['partition'], jobs)
 
-        self.reconstructor.handoffs_first = True
-        self.reconstructor._reset_stats()
-        for part_info in self.reconstructor.collect_parts():
-            jobs = self.reconstructor.build_reconstruction_jobs(part_info)
-            self.assertTrue(jobs[0]['job_type'] ==
-                            object_reconstructor.REVERT)
-            self.assert_expected_jobs(part_info['partition'], jobs)
+    def test_handoffs_only(self):
+        self.reconstructor.handoffs_only = True
+
+        found_job_types = set()
+
+        def fake_process_job(job):
+            # increment failure counter
+            self.reconstructor.handoffs_remaining += 1
+            found_job_types.add(job['job_type'])
+
+        self.reconstructor.process_job = fake_process_job
+
+        # only revert jobs
+        self.reconstructor.reconstruct()
+        self.assertEqual(found_job_types, {object_reconstructor.REVERT})
+        # but failures keep handoffs remaining
+        msgs = self.reconstructor.logger.get_lines_for_level('info')
+        self.assertIn('Next pass will continue to revert handoffs', msgs[-1])
+        self.logger._clear()
+
+        found_job_types = set()
+
+        def fake_process_job(job):
+            # success does not increment failure counter
+            found_job_types.add(job['job_type'])
+
+        self.reconstructor.process_job = fake_process_job
+
+        # only revert jobs ... but all handoffs cleared out successfully
+        self.reconstructor.reconstruct()
+        self.assertEqual(found_job_types, {object_reconstructor.REVERT})
+        # it's time to turn off handoffs_only
+        msgs = self.reconstructor.logger.get_lines_for_level('warning')
+        self.assertIn('You should disable handoffs_only', msgs[-1])
 
     def test_get_partners(self):
         # we're going to perform an exhaustive test of every possible
@@ -814,16 +831,14 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
             pass
         self.assertTrue(os.path.isfile(pol_1_part_1_path))  # sanity check
 
-        # since our collect_parts job is a generator, that yields directly
-        # into build_jobs and then spawns it's safe to do the remove_files
-        # without making reconstructor startup slow
-        self.reconstructor._reset_stats()
-        for part_info in self.reconstructor.collect_parts():
-            self.assertNotEqual(pol_1_part_1_path, part_info['part_path'])
+        self.reconstructor.process_job = lambda j: None
+        self.reconstructor.reconstruct()
+
         self.assertFalse(os.path.exists(pol_1_part_1_path))
         warnings = self.reconstructor.logger.get_lines_for_level('warning')
         self.assertEqual(1, len(warnings))
-        self.assertIn('Unexpected entity in data dir:', warnings[0])
+        self.assertIn(pol_1_part_1_path, warnings[0])
+        self.assertIn('not a directory', warnings[0].lower())
 
     def test_ignores_status_file(self):
         # Following fd86d5a, the auditor will leave status files on each device
@@ -861,7 +876,15 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
             for status_path in status_paths:
                 self.assertTrue(os.path.exists(status_path))
 
-    def _make_fake_ssync(self, ssync_calls):
+    def _make_fake_ssync(self, ssync_calls, fail_jobs=None):
+        """
+        Replace SsyncSender with a thin Fake.
+
+        :param ssync_calls: an empty list, a non_local, all calls to ssync will
+                            be captured for assertion in the caller.
+        :param fail_jobs: optional iter of dicts, any job passed into Fake that
+                          matches a failure dict will return success == False.
+        """
         class _fake_ssync(object):
             def __init__(self, daemon, node, job, suffixes, **kwargs):
                 # capture context and generate an available_map of objs
@@ -872,7 +895,7 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
                 self.suffixes = suffixes
                 self.daemon = daemon
                 self.job = job
-                hash_gen = self.daemon._diskfile_mgr.yield_hashes(
+                hash_gen = self.daemon._df_router[job['policy']].yield_hashes(
                     self.job['device'], self.job['partition'],
                     self.job['policy'], self.suffixes,
                     frag_index=self.job.get('frag_index'))
@@ -881,9 +904,15 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
                     self.available_map[hash_] = timestamps
                 context['available_map'] = self.available_map
                 ssync_calls.append(context)
+                self.success = True
+                for failure in (fail_jobs or []):
+                    if all(job.get(k) == v for (k, v) in failure.items()):
+                        self.success = False
+                        break
+                context['success'] = self.success
 
             def __call__(self, *args, **kwargs):
-                return True, self.available_map
+                return self.success, self.available_map if self.success else {}
 
         return _fake_ssync
 
@@ -941,6 +970,57 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
 
         # sanity check that some files should were deleted
         self.assertTrue(n_files > n_files_after)
+
+    def test_no_delete_failed_revert(self):
+        # test will only process revert jobs
+        self.reconstructor.handoffs_only = True
+
+        captured_ssync = []
+        # fail all jobs on part 2 on sda1
+        fail_jobs = [
+            {'device': 'sda1', 'partition': 2},
+        ]
+        with mock.patch('swift.obj.reconstructor.ssync_sender',
+                        self._make_fake_ssync(
+                            captured_ssync, fail_jobs=fail_jobs)), \
+                mocked_http_conn(*[200, 200],
+                                 body=pickle.dumps({})) as request_log:
+            self.reconstructor.reconstruct()
+
+        # global setup has four revert jobs
+        self.assertEqual(len(captured_ssync), 4)
+        expected_ssync_calls = set([
+            # device, part, frag_index
+            ('sda1', 2, 2),
+            ('sda1', 2, 0),
+            ('sda1', 0, 2),
+            ('sda1', 1, 1),
+        ])
+        self.assertEqual(expected_ssync_calls, set([
+            (context['job']['device'],
+             context['job']['partition'],
+             context['job']['frag_index'])
+            for context in captured_ssync
+        ]))
+
+        self.assertEqual(2, len(request_log.requests))
+        expected_suffix_calls = []
+        for context in captured_ssync:
+            if not context['success']:
+                # only successful jobs generate suffix rehash calls
+                continue
+            job = context['job']
+            expected_suffix_calls.append(
+                (job['sync_to'][0]['replication_ip'], '/%s/%s/%s' % (
+                    job['device'], job['partition'],
+                    '-'.join(sorted(job['suffixes']))))
+            )
+        self.assertEqual(set(expected_suffix_calls),
+                         set((r['ip'], r['path'])
+                             for r in request_log.requests))
+        self.assertFalse(
+            self.reconstructor.logger.get_lines_for_level('error'))
+        self.assertFalse(request_log.unexpected_requests)
 
     def test_get_part_jobs(self):
         # yeah, this test code expects a specific setup
@@ -1003,7 +1083,7 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
         hash_gen = self.reconstructor._df_router[policy].yield_hashes(
             'sda1', '2', policy)
         for path, hash_, ts in hash_gen:
-            self.fail('found %s with %s in %s', (hash_, ts, path))
+            self.fail('found %s with %s in %s' % (hash_, ts, path))
         # but the partition directory and hashes pkl still exist
         self.assertTrue(os.access(part_path, os.F_OK))
         hashes_path = os.path.join(self.objects_1, '2', diskfile.HASH_FILE)
@@ -1117,6 +1197,12 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
         self.assertEqual(len(found_jobs), 6)
 
 
+class TestGlobalSetupObjectReconstructorLegacyDurable(
+        TestGlobalSetupObjectReconstructor):
+    # Tests for reconstructor using real objects in test partition directories.
+    legacy_durable = True
+
+
 @patch_policies(with_ec_default=True)
 class TestObjectReconstructor(unittest.TestCase):
 
@@ -1149,6 +1235,9 @@ class TestObjectReconstructor(unittest.TestCase):
         # directly, so you end up with a /0 when you try to show the
         # percentage of complete jobs as ratio of the total job count
         self.reconstructor.job_count = 1
+        # if we ever let a test through without properly patching the
+        # REPLICATE and SSYNC calls - let's fail sort fast-ish
+        self.reconstructor.lockup_timeout = 3
 
     def tearDown(self):
         self.reconstructor._reset_stats()
@@ -1157,6 +1246,80 @@ class TestObjectReconstructor(unittest.TestCase):
 
     def ts(self):
         return next(self.ts_iter)
+
+    def test_handoffs_only_default(self):
+        # sanity neither option added to default conf
+        self.conf.pop('handoffs_only', None)
+        self.conf.pop('handoffs_first', None)
+        self.reconstructor = object_reconstructor.ObjectReconstructor(
+            self.conf, logger=self.logger)
+        self.assertFalse(self.reconstructor.handoffs_only)
+
+    def test_handoffs_first_enables_handoffs_only(self):
+        self.conf.pop('handoffs_only', None)  # sanity
+        self.conf['handoffs_first'] = True
+        self.reconstructor = object_reconstructor.ObjectReconstructor(
+            self.conf, logger=self.logger)
+        self.assertTrue(self.reconstructor.handoffs_only)
+        warnings = self.logger.get_lines_for_level('warning')
+        expected = [
+            'The handoffs_first option is deprecated in favor '
+            'of handoffs_only.  This option may be ignored in a '
+            'future release.',
+            'Handoff only mode is not intended for normal operation, '
+            'use handoffs_only with care.',
+        ]
+        self.assertEqual(expected, warnings)
+
+    def test_handoffs_only_ignores_handoffs_first(self):
+        self.conf['handoffs_first'] = True
+        self.conf['handoffs_only'] = False
+        self.reconstructor = object_reconstructor.ObjectReconstructor(
+            self.conf, logger=self.logger)
+        self.assertFalse(self.reconstructor.handoffs_only)
+        warnings = self.logger.get_lines_for_level('warning')
+        expected = [
+            'The handoffs_first option is deprecated in favor of '
+            'handoffs_only.  This option may be ignored in a future release.',
+            'Ignored handoffs_first option in favor of handoffs_only.',
+        ]
+        self.assertEqual(expected, warnings)
+
+    def test_handoffs_only_enabled(self):
+        self.conf.pop('handoffs_first', None)  # sanity
+        self.conf['handoffs_only'] = True
+        self.reconstructor = object_reconstructor.ObjectReconstructor(
+            self.conf, logger=self.logger)
+        self.assertTrue(self.reconstructor.handoffs_only)
+        warnings = self.logger.get_lines_for_level('warning')
+        expected = [
+            'Handoff only mode is not intended for normal operation, '
+            'use handoffs_only with care.',
+        ]
+        self.assertEqual(expected, warnings)
+
+    def test_two_ec_policies(self):
+        with patch_policies([
+                StoragePolicy(0, name='zero', is_deprecated=True),
+                ECStoragePolicy(1, name='one', is_default=True,
+                                ec_type=DEFAULT_TEST_EC_TYPE,
+                                ec_ndata=4, ec_nparity=3),
+                ECStoragePolicy(2, name='two',
+                                ec_type=DEFAULT_TEST_EC_TYPE,
+                                ec_ndata=8, ec_nparity=2)],
+                            fake_ring_args=[
+                                {}, {'replicas': 7}, {'replicas': 10}]):
+            self._configure_reconstructor()
+            jobs = []
+
+            def process_job(job):
+                jobs.append(job)
+
+            self.reconstructor.process_job = process_job
+
+            os.makedirs(os.path.join(self.devices, 'sda', 'objects-1', '0'))
+            self.reconstructor.run_once()
+            self.assertEqual(1, len(jobs))
 
     def test_collect_parts_skips_non_ec_policy_and_device(self):
         stub_parts = (371, 78, 419, 834)
@@ -1407,7 +1570,7 @@ class TestObjectReconstructor(unittest.TestCase):
         for device in local_devs:
             utils.mkdirs(os.path.join(self.devices, device))
         fake_unlink = mock.MagicMock()
-        self.reconstructor.reclaim_age = 1000
+        self._configure_reconstructor(reclaim_age=1000)
         now = time.time()
         with mock.patch('swift.obj.reconstructor.whataremyips',
                         return_value=[self.ip]), \
@@ -2265,14 +2428,13 @@ class TestObjectReconstructor(unittest.TestCase):
         self.assertEqual(call['node'], sync_to[0])
         self.assertEqual(set(call['suffixes']), set(['123', 'abc']))
 
-    def test_process_job_revert_to_handoff(self):
+    def test_process_job_will_not_revert_to_handoff(self):
         replicas = self.policy.object_ring.replicas
         frag_index = random.randint(0, replicas - 1)
         sync_to = [random.choice([n for n in self.policy.object_ring.devs
                                   if n != self.local_dev])]
         sync_to[0]['index'] = frag_index
         partition = 0
-        handoff = next(self.policy.object_ring.get_more_nodes(partition))
 
         stub_hashes = {
             '123': {frag_index: 'hash', None: 'hash'},
@@ -2304,28 +2466,24 @@ class TestObjectReconstructor(unittest.TestCase):
 
         expected_suffix_calls = set([
             (node['replication_ip'], '/%s/0/123-abc' % node['device'])
-            for node in (sync_to[0], handoff)
+            for node in (sync_to[0],)
         ])
 
         ssync_calls = []
         with mock_ssync_sender(ssync_calls,
                                response_callback=ssync_response_callback), \
-                mock.patch('swift.obj.diskfile.ECDiskFileManager._get_hashes',
-                           return_value=(None, stub_hashes)), \
-                mocked_http_conn(*[200] * len(expected_suffix_calls),
-                                 body=pickle.dumps({})) as request_log:
+                mocked_http_conn() as request_log:
             self.reconstructor.process_job(job)
 
-        found_suffix_calls = set((r['ip'], r['path'])
-                                 for r in request_log.requests)
-        self.assertEqual(expected_suffix_calls, found_suffix_calls)
+        # failed ssync job should not generate a suffix rehash
+        self.assertEqual([], request_log.requests)
 
         self.assertEqual(len(ssync_calls), len(expected_suffix_calls))
         call = ssync_calls[0]
         self.assertEqual(call['node'], sync_to[0])
         self.assertEqual(set(call['suffixes']), set(['123', 'abc']))
 
-    def test_process_job_revert_is_handoff(self):
+    def test_process_job_revert_is_handoff_fails(self):
         replicas = self.policy.object_ring.replicas
         frag_index = random.randint(0, replicas - 1)
         sync_to = [random.choice([n for n in self.policy.object_ring.devs
@@ -2355,36 +2513,25 @@ class TestObjectReconstructor(unittest.TestCase):
 
         def ssync_response_callback(*args):
             # in this test ssync always fails, until we encounter ourselves in
-            # the list of possible handoff's to sync to
+            # the list of possible handoff's to sync to, so handoffs_remaining
+            # should increment
             return False, {}
-
-        expected_suffix_calls = set([
-            (sync_to[0]['replication_ip'],
-             '/%s/0/123-abc' % sync_to[0]['device'])
-        ] + [
-            (node['replication_ip'], '/%s/0/123-abc' % node['device'])
-            for node in handoff_nodes[:-1]
-        ])
 
         ssync_calls = []
         with mock_ssync_sender(ssync_calls,
                                response_callback=ssync_response_callback), \
-                mock.patch('swift.obj.diskfile.ECDiskFileManager._get_hashes',
-                           return_value=(None, stub_hashes)), \
-                mocked_http_conn(*[200] * len(expected_suffix_calls),
-                                 body=pickle.dumps({})) as request_log:
+                mocked_http_conn() as request_log:
             self.reconstructor.process_job(job)
 
-        found_suffix_calls = set((r['ip'], r['path'])
-                                 for r in request_log.requests)
-        self.assertEqual(expected_suffix_calls, found_suffix_calls)
+        # failed ssync job should not generate a suffix rehash
+        self.assertEqual([], request_log.requests)
 
-        # this is ssync call to primary (which fails) plus the ssync call to
-        # all of the handoffs (except the last one - which is the local_dev)
-        self.assertEqual(len(ssync_calls), len(handoff_nodes))
+        # this is ssync call to primary (which fails) and nothing else!
+        self.assertEqual(len(ssync_calls), 1)
         call = ssync_calls[0]
         self.assertEqual(call['node'], sync_to[0])
         self.assertEqual(set(call['suffixes']), set(['123', 'abc']))
+        self.assertEqual(self.reconstructor.handoffs_remaining, 1)
 
     def test_process_job_revert_cleanup(self):
         replicas = self.policy.object_ring.replicas
@@ -2430,6 +2577,7 @@ class TestObjectReconstructor(unittest.TestCase):
         }
 
         def ssync_response_callback(*args):
+            # success should not increment handoffs_remaining
             return True, {ohash: {'ts_data': ts}}
 
         ssync_calls = []
@@ -2444,16 +2592,16 @@ class TestObjectReconstructor(unittest.TestCase):
         ], [
             (r['ip'], r['path']) for r in request_log.requests
         ])
-        # hashpath is still there, but only the durable remains
+        # hashpath is still there, but all files have been purged
         files = os.listdir(df._datadir)
-        self.assertEqual(1, len(files))
-        self.assertTrue(files[0].endswith('.durable'))
+        self.assertFalse(files)
 
         # and more to the point, the next suffix recalc will clean it up
         df_mgr = self.reconstructor._df_router[self.policy]
         df_mgr.get_hashes(self.local_dev['device'], str(partition), [],
                           self.policy)
         self.assertFalse(os.access(df._datadir, os.F_OK))
+        self.assertEqual(self.reconstructor.handoffs_remaining, 0)
 
     def test_process_job_revert_cleanup_tombstone(self):
         sync_to = [random.choice([n for n in self.policy.object_ring.devs
@@ -2512,8 +2660,9 @@ class TestObjectReconstructor(unittest.TestCase):
         node = part_nodes[1]
         metadata = {
             'name': '/a/c/o',
-            'Content-Length': 0,
+            'Content-Length': '0',
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]
@@ -2545,17 +2694,26 @@ class TestObjectReconstructor(unittest.TestCase):
                     *codes, body_iter=body_iter, headers=headers):
                 df = self.reconstructor.reconstruct_fa(
                     job, node, metadata)
+                self.assertEqual(0, df.content_length)
                 fixed_body = ''.join(df.reader())
-                self.assertEqual(len(fixed_body), len(broken_body))
-                self.assertEqual(md5(fixed_body).hexdigest(),
-                                 md5(broken_body).hexdigest())
-                for called_header in called_headers:
-                    called_header = HeaderKeyDict(called_header)
-                    self.assertTrue('Content-Length' in called_header)
-                    self.assertEqual(called_header['Content-Length'], '0')
-                    self.assertTrue('User-Agent' in called_header)
-                    user_agent = called_header['User-Agent']
-                    self.assertTrue(user_agent.startswith('obj-reconstructor'))
+        self.assertEqual(len(fixed_body), len(broken_body))
+        self.assertEqual(md5(fixed_body).hexdigest(),
+                         md5(broken_body).hexdigest())
+        self.assertEqual(len(part_nodes) - 1, len(called_headers))
+        for called_header in called_headers:
+            called_header = HeaderKeyDict(called_header)
+            self.assertIn('Content-Length', called_header)
+            self.assertEqual(called_header['Content-Length'], '0')
+            self.assertIn('User-Agent', called_header)
+            user_agent = called_header['User-Agent']
+            self.assertTrue(user_agent.startswith('obj-reconstructor'))
+            self.assertIn('X-Backend-Storage-Policy-Index', called_header)
+            self.assertEqual(called_header['X-Backend-Storage-Policy-Index'],
+                             self.policy)
+            self.assertIn('X-Backend-Fragment-Preferences', called_header)
+            self.assertEqual(
+                [{'timestamp': '1234567890.12345', 'exclude': []}],
+                json.loads(called_header['X-Backend-Fragment-Preferences']))
 
     def test_reconstruct_fa_errors_works(self):
         job = {
@@ -2568,6 +2726,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]
@@ -2609,6 +2768,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         # make up some data (trim some amount to make it unaligned with
@@ -2652,6 +2812,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         possible_errors = [404, Timeout(), Exception('kaboom!')]
@@ -2672,6 +2833,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]
@@ -2722,6 +2884,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]
@@ -2773,6 +2936,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]
@@ -2814,6 +2978,7 @@ class TestObjectReconstructor(unittest.TestCase):
             'name': '/a/c/o',
             'Content-Length': 0,
             'ETag': 'etag',
+            'X-Timestamp': '1234567890.12345'
         }
 
         test_data = ('rebuild' * self.policy.ec_segment_size)[:-777]

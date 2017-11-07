@@ -17,6 +17,8 @@ import json
 import unittest
 import mock
 
+from six.moves.urllib.parse import urlparse
+
 from swift.common.swob import Request, Response, HTTPUnauthorized
 from swift.common.middleware import staticweb
 
@@ -554,8 +556,8 @@ class TestStaticWeb(unittest.TestCase):
         self.assertEqual(resp.status_int, 200)
         self.assertTrue('Listing of /v1/a/c3/subdir/' in resp.body)
         self.assertTrue('</style>' in resp.body)
-        self.assertTrue('<link' not in resp.body)
-        self.assertTrue('listing.css' not in resp.body)
+        self.assertNotIn('<link', resp.body)
+        self.assertNotIn('listing.css', resp.body)
 
     def test_container3subdirx(self):
         resp = Request.blank(
@@ -576,7 +578,7 @@ class TestStaticWeb(unittest.TestCase):
         resp = Request.blank(
             '/v1/a/c3/unknown').get_response(self.test_staticweb)
         self.assertEqual(resp.status_int, 404)
-        self.assertTrue("Chrome's 404 fancy-page sucks." not in resp.body)
+        self.assertNotIn("Chrome's 404 fancy-page sucks.", resp.body)
 
     def test_container3bindexhtml(self):
         resp = Request.blank('/v1/a/c3b/').get_response(self.test_staticweb)
@@ -614,7 +616,7 @@ class TestStaticWeb(unittest.TestCase):
             '/v1/a/c4/subdir/').get_response(self.test_staticweb)
         self.assertEqual(resp.status_int, 200)
         self.assertTrue('Listing of /v1/a/c4/subdir/' in resp.body)
-        self.assertTrue('</style>' not in resp.body)
+        self.assertNotIn('</style>', resp.body)
         self.assertTrue('<link' in resp.body)
         self.assertTrue('href="../listing.css"' in resp.body)
         self.assertEqual(resp.headers['content-type'],
@@ -638,7 +640,7 @@ class TestStaticWeb(unittest.TestCase):
         resp = Request.blank(
             '/v1/a/c5/unknown').get_response(self.test_staticweb)
         self.assertEqual(resp.status_int, 404)
-        self.assertTrue("Chrome's 404 fancy-page sucks." not in resp.body)
+        self.assertNotIn("Chrome's 404 fancy-page sucks.", resp.body)
 
     def test_container6subdir(self):
         resp = Request.blank(
@@ -794,7 +796,7 @@ class TestStaticWeb(unittest.TestCase):
         resp = Request.blank('/v1/a/c7/').get_response(
             self.test_staticweb)
         self.assertEqual(resp.status_int, 404)
-        self.assertTrue('listing.css' not in resp.body)
+        self.assertNotIn('listing.css', resp.body)
         self.assertTrue('<style' in resp.body)
 
     def test_subrequest_once_if_possible(self):
@@ -839,6 +841,57 @@ class TestStaticWeb(unittest.TestCase):
             # testing for _error_response
             resp = Request.blank('/v1/a/c5/').get_response(self.test_staticweb)
             self.assertEqual(resp.status_int, 503)  # sanity
+
+
+class TestStaticWebUrlBase(unittest.TestCase):
+
+    def setUp(self):
+        self.app = FakeApp()
+        self._orig_get_container_info = staticweb.get_container_info
+        staticweb.get_container_info = mock_get_container_info
+
+    def tearDown(self):
+        staticweb.get_container_info = self._orig_get_container_info
+
+    def test_container3subdirz_scheme(self):
+        path = '/v1/a/c3/subdirz'
+        scheme = 'https'
+        test_staticweb = FakeAuthFilter(
+            staticweb.filter_factory({'url_base': 'https://'})(self.app))
+        resp = Request.blank(path).get_response(test_staticweb)
+        self.assertEqual(resp.status_int, 301)
+        parsed = urlparse(resp.location)
+        self.assertEqual(parsed.scheme, scheme)
+        # We omit comparing netloc here, because swob is free to add port.
+        self.assertEqual(parsed.path, path + '/')
+
+    def test_container3subdirz_host(self):
+        path = '/v1/a/c3/subdirz'
+        netloc = 'example.com'
+        test_staticweb = FakeAuthFilter(
+            staticweb.filter_factory({
+                'url_base': '//%s' % (netloc,)})(self.app))
+        resp = Request.blank(path).get_response(test_staticweb)
+        self.assertEqual(resp.status_int, 301)
+        parsed = urlparse(resp.location)
+        # We compare scheme with the default. This may change, but unlikely.
+        self.assertEqual(parsed.scheme, 'http')
+        self.assertEqual(parsed.netloc, netloc)
+        self.assertEqual(parsed.path, path + '/')
+
+    def test_container3subdirz_both(self):
+        path = '/v1/a/c3/subdirz'
+        scheme = 'http'
+        netloc = 'example.com'
+        test_staticweb = FakeAuthFilter(
+            staticweb.filter_factory({
+                'url_base': 'http://example.com'})(self.app))
+        resp = Request.blank(path).get_response(test_staticweb)
+        self.assertEqual(resp.status_int, 301)
+        parsed = urlparse(resp.location)
+        self.assertEqual(parsed.scheme, scheme)
+        self.assertEqual(parsed.netloc, netloc)
+        self.assertEqual(parsed.path, path + '/')
 
 
 if __name__ == '__main__':

@@ -27,7 +27,7 @@ from xml.dom import minidom
 import time
 import random
 
-from eventlet import spawn, Timeout, listen
+from eventlet import spawn, Timeout
 import json
 import six
 from six import BytesIO
@@ -45,6 +45,7 @@ from test.unit import fake_http_connect, debug_logger
 from swift.common.storage_policy import (POLICIES, StoragePolicy)
 from swift.common.request_helpers import get_sys_meta_prefix
 
+from test import listen_zero
 from test.unit import patch_policies
 
 
@@ -137,8 +138,8 @@ class TestContainerController(unittest.TestCase):
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         response = req.get_response(self.controller)
         self.assertTrue(response.status.startswith('204'))
-        self.assertTrue('x-container-read' not in response.headers)
-        self.assertTrue('x-container-write' not in response.headers)
+        self.assertNotIn('x-container-read', response.headers)
+        self.assertNotIn('x-container-write', response.headers)
         # Ensure POSTing acls works
         req = Request.blank(
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
@@ -164,8 +165,8 @@ class TestContainerController(unittest.TestCase):
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         response = req.get_response(self.controller)
         self.assertTrue(response.status.startswith('204'))
-        self.assertTrue('x-container-read' not in response.headers)
-        self.assertTrue('x-container-write' not in response.headers)
+        self.assertNotIn('x-container-read', response.headers)
+        self.assertNotIn('x-container-write', response.headers)
         # Ensure PUTing acls works
         req = Request.blank(
             '/sda1/p/a/c2', environ={'REQUEST_METHOD': 'PUT'},
@@ -180,12 +181,7 @@ class TestContainerController(unittest.TestCase):
         self.assertEqual(response.headers.get('x-container-write'),
                          'account:user')
 
-    def test_HEAD(self):
-        start = int(time.time())
-        ts = (Timestamp(t).internal for t in itertools.count(start))
-        req = Request.blank('/sda1/p/a/c', method='PUT', headers={
-            'x-timestamp': next(ts)})
-        req.get_response(self.controller)
+    def _test_head(self, start, ts):
         req = Request.blank('/sda1/p/a/c', method='HEAD')
         response = req.get_response(self.controller)
         self.assertEqual(response.status_int, 204)
@@ -213,6 +209,9 @@ class TestContainerController(unittest.TestCase):
         self.assertTrue(created_at_header >= start)
         self.assertEqual(response.headers['x-put-timestamp'],
                          Timestamp(start).normal)
+        self.assertEqual(
+            response.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(start)))
 
         # backend headers
         self.assertEqual(int(response.headers
@@ -226,6 +225,22 @@ class TestContainerController(unittest.TestCase):
                          Timestamp(0).internal)
         self.assertEqual(response.headers['x-backend-status-changed-at'],
                          Timestamp(start).internal)
+
+    def test_HEAD(self):
+        start = int(time.time())
+        ts = (Timestamp(t).internal for t in itertools.count(start))
+        req = Request.blank('/sda1/p/a/c', method='PUT', headers={
+            'x-timestamp': next(ts)})
+        req.get_response(self.controller)
+        self._test_head(Timestamp(start), ts)
+
+    def test_HEAD_timestamp_with_offset(self):
+        start = int(time.time())
+        ts = (Timestamp(t, offset=1).internal for t in itertools.count(start))
+        req = Request.blank('/sda1/p/a/c', method='PUT', headers={
+            'x-timestamp': next(ts)})
+        req.get_response(self.controller)
+        self._test_head(Timestamp(start, offset=1), ts)
 
     def test_HEAD_not_found(self):
         req = Request.blank('/sda1/p/a/c', method='HEAD')
@@ -241,6 +256,8 @@ class TestContainerController(unittest.TestCase):
                          Timestamp(0).internal)
         self.assertEqual(resp.headers['x-backend-delete-timestamp'],
                          Timestamp(0).internal)
+        self.assertIsNone(resp.last_modified)
+
         for header in ('x-container-object-count', 'x-container-bytes-used',
                        'x-timestamp', 'x-put-timestamp'):
             self.assertEqual(resp.headers[header], None)
@@ -264,6 +281,7 @@ class TestContainerController(unittest.TestCase):
             req = Request.blank('/sda1/p/a/c', method=method)
             resp = req.get_response(self.controller)
             self.assertEqual(resp.status_int, 404)
+            self.assertIsNone(resp.last_modified)
             # backend headers
             self.assertEqual(int(resp.headers[
                                  'X-Backend-Storage-Policy-Index']),
@@ -720,7 +738,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue('x-container-meta-test' not in resp.headers)
+        self.assertNotIn('x-container-meta-test', resp.headers)
 
     def test_PUT_GET_sys_metadata(self):
         prefix = get_sys_meta_prefix('container')
@@ -778,7 +796,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue(key.lower() not in resp.headers)
+        self.assertNotIn(key.lower(), resp.headers)
 
     def test_PUT_invalid_partition(self):
         req = Request.blank('/sda1/./a/c', environ={'REQUEST_METHOD': 'PUT',
@@ -861,7 +879,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue('x-container-meta-test' not in resp.headers)
+        self.assertNotIn('x-container-meta-test', resp.headers)
         self.assertEqual(resp.headers.get('x-put-timestamp'),
                          '0000000004.00000')
 
@@ -913,7 +931,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue(key.lower() not in resp.headers)
+        self.assertNotIn(key.lower(), resp.headers)
 
     def test_POST_invalid_partition(self):
         req = Request.blank('/sda1/./a/c', environ={'REQUEST_METHOD': 'POST',
@@ -1006,7 +1024,7 @@ class TestContainerController(unittest.TestCase):
         self.assertEqual(resp.status_int, 400)
 
     def test_account_update_account_override_deleted(self):
-        bindsock = listen(('127.0.0.1', 0))
+        bindsock = listen_zero()
         req = Request.blank(
             '/sda1/p/a/c',
             environ={'REQUEST_METHOD': 'PUT',
@@ -1024,7 +1042,7 @@ class TestContainerController(unittest.TestCase):
             self.assertEqual(resp.status_int, 201)
 
     def test_PUT_account_update(self):
-        bindsock = listen(('127.0.0.1', 0))
+        bindsock = listen_zero()
 
         def accept(return_code, expected_timestamp):
             try:
@@ -1268,13 +1286,7 @@ class TestContainerController(unittest.TestCase):
             resp = req.get_response(self.container_controller)
         self.assertEqual(resp.status_int, 507)
 
-    def test_REPLICATE_works(self):
-        mkdirs(os.path.join(self.testdir, 'sda1', 'containers', 'p', 'a', 'a'))
-        db_file = os.path.join(self.testdir, 'sda1',
-                               storage_directory('containers', 'p', 'a'),
-                               'a' + '.db')
-        open(db_file, 'w')
-
+    def test_REPLICATE_rsync_then_merge_works(self):
         def fake_rsync_then_merge(self, drive, db_file, args):
             return HTTPNoContent()
 
@@ -1289,12 +1301,55 @@ class TestContainerController(unittest.TestCase):
             resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
 
+    def test_REPLICATE_complete_rsync_works(self):
+        def fake_complete_rsync(self, drive, db_file, args):
+            return HTTPNoContent()
+        with mock.patch("swift.container.replicator.ContainerReplicatorRpc."
+                        "complete_rsync", fake_complete_rsync):
+            req = Request.blank('/sda1/p/a/',
+                                environ={'REQUEST_METHOD': 'REPLICATE'},
+                                headers={})
+            json_string = '["complete_rsync", "a.db"]'
+            inbuf = WsgiBytesIO(json_string)
+            req.environ['wsgi.input'] = inbuf
+            resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 204)
+
+    def test_REPLICATE_value_error_works(self):
+        req = Request.blank('/sda1/p/a/',
+                            environ={'REQUEST_METHOD': 'REPLICATE'},
+                            headers={})
         # check valuerror
         wsgi_input_valuerror = '["sync" : sync, "-1"]'
         inbuf1 = WsgiBytesIO(wsgi_input_valuerror)
         req.environ['wsgi.input'] = inbuf1
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 400)
+
+    def test_REPLICATE_unknown_sync(self):
+        # First without existing DB file
+        req = Request.blank('/sda1/p/a/',
+                            environ={'REQUEST_METHOD': 'REPLICATE'},
+                            headers={})
+        json_string = '["unknown_sync", "a.db"]'
+        inbuf = WsgiBytesIO(json_string)
+        req.environ['wsgi.input'] = inbuf
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 404)
+
+        mkdirs(os.path.join(self.testdir, 'sda1', 'containers', 'p', 'a', 'a'))
+        db_file = os.path.join(self.testdir, 'sda1',
+                               storage_directory('containers', 'p', 'a'),
+                               'a' + '.db')
+        open(db_file, 'w')
+        req = Request.blank('/sda1/p/a/',
+                            environ={'REQUEST_METHOD': 'REPLICATE'},
+                            headers={})
+        json_string = '["unknown_sync", "a.db"]'
+        inbuf = WsgiBytesIO(json_string)
+        req.environ['wsgi.input'] = inbuf
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 500)
 
     def test_DELETE(self):
         req = Request.blank(
@@ -1847,7 +1902,7 @@ class TestContainerController(unittest.TestCase):
             self.assertEqual(obj['last_modified'], t9.isoformat)
 
     def test_DELETE_account_update(self):
-        bindsock = listen(('127.0.0.1', 0))
+        bindsock = listen_zero()
 
         def accept(return_code, expected_timestamp):
             try:
@@ -2021,6 +2076,9 @@ class TestContainerController(unittest.TestCase):
             environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.content_type, 'application/json')
+        self.assertEqual(
+            resp.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(0)))
         self.assertEqual(json.loads(resp.body), json_body)
         self.assertEqual(resp.charset, 'utf-8')
 
@@ -2082,6 +2140,9 @@ class TestContainerController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.content_type, 'text/plain')
+        self.assertEqual(
+            resp.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(0)))
         self.assertEqual(resp.body, plain_body)
         self.assertEqual(resp.charset, 'utf-8')
 
@@ -2212,6 +2273,9 @@ class TestContainerController(unittest.TestCase):
             environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.content_type, 'application/xml')
+        self.assertEqual(
+            resp.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+            time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(0)))
         self.assertEqual(resp.body, xml_body)
         self.assertEqual(resp.charset, 'utf-8')
 

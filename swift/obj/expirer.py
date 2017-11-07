@@ -65,7 +65,10 @@ class ObjectExpirer(Daemon):
             raise ValueError("concurrency must be set to at least 1")
         self.processes = int(self.conf.get('processes', 0))
         self.process = int(self.conf.get('process', 0))
-        self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
+        # This option defines how long an un-processable expired object
+        # marker will be retried before it is abandoned.  It is not coupled
+        # with the tombstone reclaim age in the consistency engine.
+        self.reclaim_age = int(conf.get('reclaim_age', 604800))
 
     def report(self, final=False):
         """
@@ -252,7 +255,7 @@ class ObjectExpirer(Daemon):
 
         if self.processes and self.process >= self.processes:
             raise ValueError(
-                'process must be less than or equal to processes')
+                'process must be less than processes')
 
     def delete_object(self, actual_obj, timestamp, container, obj):
         start_time = time()
@@ -260,7 +263,8 @@ class ObjectExpirer(Daemon):
             try:
                 self.delete_actual_object(actual_obj, timestamp)
             except UnexpectedResponse as err:
-                if err.resp.status_int != HTTP_NOT_FOUND:
+                if err.resp.status_int not in {HTTP_NOT_FOUND,
+                                               HTTP_PRECONDITION_FAILED}:
                     raise
                 if float(timestamp) > time() - self.reclaim_age:
                     # we'll have to retry the DELETE later
@@ -301,4 +305,4 @@ class ObjectExpirer(Daemon):
         self.swift.make_request('DELETE', path,
                                 {'X-If-Delete-At': str(timestamp),
                                  'X-Timestamp': str(timestamp)},
-                                (2, HTTP_PRECONDITION_FAILED))
+                                (2,))

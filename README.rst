@@ -1,3 +1,12 @@
+========================
+Team and repository tags
+========================
+
+.. image:: http://governance.openstack.org/badges/swift.svg
+    :target: http://governance.openstack.org/reference/tags/index.html
+
+.. Change things from this point on
+
 Swift
 =====
 
@@ -111,7 +120,7 @@ For Deployers
 
 Deployer docs are also available at
 http://docs.openstack.org/developer/swift/. A good starting point is at
-http://docs.openstack.org/developer/swift/deployment\_guide.html
+http://docs.openstack.org/developer/swift/deployment_guide.html
 
 There is an `ops runbook <http://docs.openstack.org/developer/swift/ops_runbook/>`__
 that gives information about how to diagnose and troubleshoot common issues

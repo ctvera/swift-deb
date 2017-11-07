@@ -21,7 +21,7 @@ import os
 import unittest
 import six.moves.cPickle as pickle
 from array import array
-from collections import defaultdict
+from collections import Counter, defaultdict
 from math import ceil
 from tempfile import mkdtemp
 from shutil import rmtree
@@ -49,11 +49,9 @@ class TestRingBuilder(unittest.TestCase):
         Returns a dictionary mapping the given device key to (number of
         partitions assigned to that key).
         """
-        counts = defaultdict(int)
-        for part2dev_id in builder._replica2part2dev:
-            for dev_id in part2dev_id:
-                counts[builder.devs[dev_id][key]] += 1
-        return counts
+        return Counter(builder.devs[dev_id][key]
+                       for part2dev_id in builder._replica2part2dev
+                       for dev_id in part2dev_id)
 
     def _get_population_by_region(self, builder):
         """
@@ -69,20 +67,26 @@ class TestRingBuilder(unittest.TestCase):
         self.assertEqual(rb.min_part_hours, 1)
         self.assertEqual(rb.parts, 2 ** 8)
         self.assertEqual(rb.devs, [])
-        self.assertEqual(rb.devs_changed, False)
+        self.assertFalse(rb.devs_changed)
         self.assertEqual(rb.version, 0)
 
     def test_overlarge_part_powers(self):
-        ring.RingBuilder(32, 3, 1)  # passes by not crashing
-        self.assertRaises(ValueError, ring.RingBuilder, 33, 3, 1)
+        expected_msg = 'part_power must be at most 32 (was 33)'
+        with self.assertRaises(ValueError) as ctx:
+            ring.RingBuilder(33, 3, 1)
+        self.assertEqual(str(ctx.exception), expected_msg)
 
     def test_insufficient_replicas(self):
-        ring.RingBuilder(8, 1.0, 1)  # passes by not crashing
-        self.assertRaises(ValueError, ring.RingBuilder, 8, 0.999, 1)
+        expected_msg = 'replicas must be at least 1 (was 0.999000)'
+        with self.assertRaises(ValueError) as ctx:
+            ring.RingBuilder(8, 0.999, 1)
+        self.assertEqual(str(ctx.exception), expected_msg)
 
     def test_negative_min_part_hours(self):
-        ring.RingBuilder(8, 3, 0)  # passes by not crashing
-        self.assertRaises(ValueError, ring.RingBuilder, 8, 3, -1)
+        expected_msg = 'min_part_hours must be non-negative (was -1)'
+        with self.assertRaises(ValueError) as ctx:
+            ring.RingBuilder(8, 3, -1)
+        self.assertEqual(str(ctx.exception), expected_msg)
 
     def test_deepcopy(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -110,11 +114,11 @@ class TestRingBuilder(unittest.TestCase):
         rb_copy = copy.deepcopy(rb)
 
         self.assertEqual(rb.to_dict(), rb_copy.to_dict())
-        self.assertTrue(rb.devs is not rb_copy.devs)
-        self.assertTrue(rb._replica2part2dev is not rb_copy._replica2part2dev)
-        self.assertTrue(rb._last_part_moves is not rb_copy._last_part_moves)
-        self.assertTrue(rb._remove_devs is not rb_copy._remove_devs)
-        self.assertTrue(rb._dispersion_graph is not rb_copy._dispersion_graph)
+        self.assertIsNot(rb.devs, rb_copy.devs)
+        self.assertIsNot(rb._replica2part2dev, rb_copy._replica2part2dev)
+        self.assertIsNot(rb._last_part_moves, rb_copy._last_part_moves)
+        self.assertIsNot(rb._remove_devs, rb_copy._remove_devs)
+        self.assertIsNot(rb._dispersion_graph, rb_copy._dispersion_graph)
 
     def test_get_ring(self):
         rb = ring.RingBuilder(8, 3, 1)
@@ -129,14 +133,14 @@ class TestRingBuilder(unittest.TestCase):
         rb.remove_dev(1)
         rb.rebalance()
         r = rb.get_ring()
-        self.assertTrue(isinstance(r, ring.RingData))
+        self.assertIsInstance(r, ring.RingData)
         r2 = rb.get_ring()
-        self.assertTrue(r is r2)
+        self.assertIs(r, r2)
         rb.rebalance()
         r3 = rb.get_ring()
-        self.assertTrue(r3 is not r2)
+        self.assertIsNot(r3, r2)
         r4 = rb.get_ring()
-        self.assertTrue(r3 is r4)
+        self.assertIs(r3, r4)
 
     def test_rebalance_with_seed(self):
         devs = [(0, 10000), (1, 10001), (2, 10002), (1, 10003)]
@@ -157,7 +161,7 @@ class TestRingBuilder(unittest.TestCase):
         rb2 = ring_builders[2]
 
         r0 = rb0.get_ring()
-        self.assertTrue(rb0.get_ring() is r0)
+        self.assertIs(rb0.get_ring(), r0)
 
         rb0.rebalance()  # NO SEED
         rb1.rebalance(seed=10)
@@ -166,7 +170,7 @@ class TestRingBuilder(unittest.TestCase):
         r1 = rb1.get_ring()
         r2 = rb2.get_ring()
 
-        self.assertFalse(rb0.get_ring() is r0)
+        self.assertIsNot(rb0.get_ring(), r0)
         self.assertNotEqual(r0.to_dict(), r1.to_dict())
         self.assertEqual(r1.to_dict(), r2.to_dict())
 
@@ -281,6 +285,32 @@ class TestRingBuilder(unittest.TestCase):
                 counts[dev_id] = counts.get(dev_id, 0) + 1
         self.assertEqual(counts, {0: 256, 2: 256, 3: 256})
 
+    def test_round_off_error(self):
+        # 3 nodes with 11 disks each is particularly problematic. Probably has
+        # to do with the binary repr. of 1/33? Those ones look suspicious...
+        #
+        #   >>> bin(int(struct.pack('!f', 1.0/(33)).encode('hex'), 16))
+        #   '0b111100111110000011111000010000'
+        rb = ring.RingBuilder(8, 3, 1)
+        for dev_id, (region, zone) in enumerate(
+                11 * [(0, 0), (1, 10), (1, 11)]):
+            rb.add_dev({'id': dev_id, 'region': region, 'zone': zone,
+                        'weight': 1, 'ip': '127.0.0.1',
+                        'port': 10000 + region * 100 + zone,
+                        'device': 'sda%d' % dev_id})
+        rb.rebalance()
+        self.assertEqual(self._partition_counts(rb, 'zone'),
+                         {0: 256, 10: 256, 11: 256})
+        wanted_by_zone = defaultdict(lambda: defaultdict(int))
+        for dev in rb._iter_devs():
+            wanted_by_zone[dev['zone']][dev['parts_wanted']] += 1
+        # We're nicely balanced, but parts_wanted is slightly lumpy
+        # because reasons.
+        self.assertEqual(wanted_by_zone, {
+            0: {0: 10, 1: 1},
+            10: {0: 11},
+            11: {0: 10, -1: 1}})
+
     def test_remove_a_lot(self):
         rb = ring.RingBuilder(3, 3, 1)
         rb.add_dev({'id': 0, 'device': 'd0', 'ip': '10.0.0.1',
@@ -391,7 +421,7 @@ class TestRingBuilder(unittest.TestCase):
         _, balance, _ = rb.rebalance(seed=2)
 
         # maybe not *perfect*, but should be close
-        self.assertTrue(balance <= 1)
+        self.assertLessEqual(balance, 1)
 
     def test_multitier_partial(self):
         # Multitier test, nothing full
@@ -695,7 +725,7 @@ class TestRingBuilder(unittest.TestCase):
                     "Partition %d not in zones 0 and 1 (got %r)" %
                     (part, zones))
 
-    def test_min_part_hours_zero_will_move_whatever_it_takes(self):
+    def test_min_part_hours_zero_will_move_one_replica(self):
         rb = ring.RingBuilder(8, 3, 0)
         # there'll be at least one replica in z0 and z1
         rb.add_dev({'id': 0, 'region': 0, 'zone': 0, 'weight': 0.5,
@@ -717,6 +747,35 @@ class TestRingBuilder(unittest.TestCase):
                     'ip': '127.0.0.1', 'port': 10000, 'device': 'sdf1'})
         rb.rebalance(seed=3)
         rb.validate()
+
+        self.assertEqual(0, rb.dispersion)
+        # Only one replica could move, so some zones are quite unbalanced
+        self.assertAlmostEqual(rb.get_balance(), 66.66, delta=0.5)
+
+        # There was only zone 0 and 1 before adding more devices. Only one
+        # replica should have been moved, therefore we expect 256 parts in zone
+        # 0 and 1, and a total of 256 in zone 2,3, and 4
+        expected = defaultdict(int, {0: 256, 1: 256, 2: 86, 3: 85, 4: 85})
+        self.assertEqual(expected, self._partition_counts(rb, key='zone'))
+
+        zone_histogram = defaultdict(int)
+        for part in range(rb.parts):
+            zones = [
+                rb.devs[rb._replica2part2dev[replica][part]]['zone']
+                for replica in range(rb.replicas)]
+            zone_histogram[tuple(sorted(zones))] += 1
+
+        # We expect that every partition moved exactly one replica
+        expected = {
+            (0, 1, 2): 86,
+            (0, 1, 3): 85,
+            (0, 1, 4): 85,
+        }
+        self.assertEqual(zone_histogram, expected)
+
+        # After rebalancing one more times, we expect that everything is in a
+        # good state
+        rb.rebalance(seed=3)
 
         self.assertEqual(0, rb.dispersion)
         # a balance of w/i a 1% isn't too bad for 3 replicas on 7
@@ -2063,8 +2122,8 @@ class TestRingBuilder(unittest.TestCase):
         self.assertEqual(counts, {0: 128, 1: 128, 2: 256, 3: 256})
 
         dev_usage, worst = rb.validate()
-        self.assertTrue(dev_usage is None)
-        self.assertTrue(worst is None)
+        self.assertIsNone(dev_usage)
+        self.assertIsNone(worst)
 
         dev_usage, worst = rb.validate(stats=True)
         self.assertEqual(list(dev_usage), [32, 32, 64, 64,
@@ -2394,7 +2453,7 @@ class TestRingBuilder(unittest.TestCase):
         new_dev_id = rb.add_dev({'region': 0, 'zone': 0, 'ip': '127.0.0.1',
                                  'port': 6200, 'weight': 1.0,
                                  'device': 'sda'})
-        self.assertTrue(new_dev_id < add_dev_count)
+        self.assertLess(new_dev_id, add_dev_count)
 
         # try with non-contiguous holes
         # [0, 1, None, 3, 4, None]
@@ -2494,7 +2553,7 @@ class TestRingBuilder(unittest.TestCase):
             # Due to the increased partition power, the partition each object
             # is assigned to has changed. If the old partition was X, it will
             # now be either located in 2*X or 2*X+1
-            self.assertTrue(new_part in [old_part * 2, old_part * 2 + 1])
+            self.assertIn(new_part, [old_part * 2, old_part * 2 + 1])
 
             # Importantly, we expect the objects to be placed on the same
             # nodes after increasing the partition power

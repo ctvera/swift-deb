@@ -89,11 +89,15 @@ def roundrobin_datadirs(datadirs):
             suffixes = os.listdir(part_dir)
             if not suffixes:
                 os.rmdir(part_dir)
+                continue
             for suffix in suffixes:
                 suff_dir = os.path.join(part_dir, suffix)
                 if not os.path.isdir(suff_dir):
                     continue
                 hashes = os.listdir(suff_dir)
+                if not hashes:
+                    os.rmdir(suff_dir)
+                    continue
                 for hsh in hashes:
                     hash_dir = os.path.join(suff_dir, hsh)
                     if not os.path.isdir(hash_dir):
@@ -101,6 +105,12 @@ def roundrobin_datadirs(datadirs):
                     object_file = os.path.join(hash_dir, hsh + '.db')
                     if os.path.exists(object_file):
                         yield (partition, object_file, node_id)
+                    else:
+                        try:
+                            os.rmdir(hash_dir)
+                        except OSError as e:
+                            if e.errno is not errno.ENOTEMPTY:
+                                raise
 
     its = [walk_datadir(datadir, node_id) for datadir, node_id in datadirs]
     while its:
@@ -117,7 +127,6 @@ class ReplConnection(BufferedHTTPConnection):
     """
 
     def __init__(self, node, partition, hash_, logger):
-        ""
         self.logger = logger
         self.node = node
         host = "%s:%s" % (node['replication_ip'], node['replication_port'])
@@ -296,7 +305,7 @@ class Replicator(Daemon):
                     return False
         with Timeout(replicate_timeout or self.node_timeout):
             response = http.replicate(replicate_method, local_id)
-        return response and response.status >= 200 and response.status < 300
+        return response and 200 <= response.status < 300
 
     def _usync_db(self, point, broker, http, remote_id, local_id):
         """
@@ -342,7 +351,7 @@ class Replicator(Daemon):
         else:
             with Timeout(self.node_timeout):
                 response = http.replicate('merge_syncs', sync_table)
-            if response and response.status >= 200 and response.status < 300:
+            if response and 200 <= response.status < 300:
                 broker.merge_syncs([{'remote_id': remote_id,
                                      'sync_point': point}],
                                    incoming=False)
@@ -429,7 +438,7 @@ class Replicator(Daemon):
                                   different_region=different_region)
         elif response.status == HTTP_INSUFFICIENT_STORAGE:
             raise DriveNotMounted()
-        elif response.status >= 200 and response.status < 300:
+        elif 200 <= response.status < 300:
             rinfo = json.loads(response.data)
             local_sync = broker.get_sync(rinfo['id'], incoming=False)
             if self._in_sync(rinfo, info, broker, local_sync):
@@ -507,8 +516,7 @@ class Replicator(Daemon):
         # than the put_timestamp, and there are no objects.
         delete_timestamp = Timestamp(info.get('delete_timestamp') or 0)
         put_timestamp = Timestamp(info.get('put_timestamp') or 0)
-        if delete_timestamp < (now - self.reclaim_age) and \
-                delete_timestamp > put_timestamp and \
+        if (now - self.reclaim_age) > delete_timestamp > put_timestamp and \
                 info['count'] in (None, '', 0, '0'):
             if self.report_up_to_date(info):
                 self.delete_db(broker)
@@ -535,7 +543,7 @@ class Replicator(Daemon):
         more_nodes = self.ring.get_more_nodes(int(partition))
         if not local_dev:
             # Check further if local device is a handoff node
-            for node in more_nodes:
+            for node in self.ring.get_more_nodes(int(partition)):
                 if node['id'] == node_id:
                     local_dev = node
                     break
@@ -551,7 +559,13 @@ class Replicator(Daemon):
                 success = self._repl_to_node(node, broker, partition, info,
                                              different_region)
             except DriveNotMounted:
-                repl_nodes.append(next(more_nodes))
+                try:
+                    repl_nodes.append(next(more_nodes))
+                except StopIteration:
+                    self.logger.error(
+                        _('ERROR There are not enough handoff nodes to reach '
+                          'replica count for partition %s'),
+                        partition)
                 self.logger.error(_('ERROR Remote drive not mounted %s'), node)
             except (Exception, Timeout):
                 self.logger.exception(_('ERROR syncing %(file)s with node'

@@ -249,6 +249,8 @@ class TestRange(unittest.TestCase):
         6. any combination of the above
         """
 
+        _assert_invalid_range(None)
+        _assert_invalid_range('nonbytes=0-')
         _assert_invalid_range('nonbytes=foobar,10-2')
         _assert_invalid_range('bytes=5-3')
         _assert_invalid_range('bytes=-')
@@ -259,6 +261,7 @@ class TestRange(unittest.TestCase):
         _assert_invalid_range('bytes=nonumber-5')
         _assert_invalid_range('bytes=nonumber')
         _assert_invalid_range('bytes=--1')
+        _assert_invalid_range('bytes=--0')
 
 
 class TestMatch(unittest.TestCase):
@@ -267,7 +270,7 @@ class TestMatch(unittest.TestCase):
         self.assertEqual(match.tags, set(('a', 'b')))
         self.assertTrue('a' in match)
         self.assertTrue('b' in match)
-        self.assertTrue('c' not in match)
+        self.assertNotIn('c', match)
 
     def test_match_star(self):
         match = swift.common.swob.Match('"a", "*"')
@@ -280,7 +283,7 @@ class TestMatch(unittest.TestCase):
         self.assertEqual(match.tags, set(('a', 'b')))
         self.assertTrue('a' in match)
         self.assertTrue('b' in match)
-        self.assertTrue('c' not in match)
+        self.assertNotIn('c', match)
 
 
 class TestTransferEncoding(unittest.TestCase):
@@ -721,7 +724,7 @@ class TestRequest(unittest.TestCase):
 
         req = swift.common.swob.Request.blank('/')
         resp = req.get_response(test_app)
-        self.assertTrue('Www-Authenticate' not in resp.headers)
+        self.assertNotIn('Www-Authenticate', resp.headers)
 
     def test_properties(self):
         req = swift.common.swob.Request.blank('/hi/there', body='hi')
@@ -741,7 +744,7 @@ class TestRequest(unittest.TestCase):
 
         self.assertTrue('Range' in req.headers)
         req.range = None
-        self.assertTrue('Range' not in req.headers)
+        self.assertNotIn('Range', req.headers)
 
     def test_datetime_properties(self):
         req = swift.common.swob.Request.blank('/hi/there', body='hi')
@@ -758,7 +761,7 @@ class TestRequest(unittest.TestCase):
 
         self.assertTrue('If-Unmodified-Since' in req.headers)
         req.if_unmodified_since = None
-        self.assertTrue('If-Unmodified-Since' not in req.headers)
+        self.assertNotIn('If-Unmodified-Since', req.headers)
 
         too_big_date_list = list(datetime.datetime.max.timetuple())
         too_big_date_list[0] += 1  # bump up the year
@@ -1029,12 +1032,12 @@ class TestResponse(unittest.TestCase):
         self.assertEqual(resp.location, 'something')
         self.assertTrue('Location' in resp.headers)
         resp.location = None
-        self.assertTrue('Location' not in resp.headers)
+        self.assertNotIn('Location', resp.headers)
 
         resp.content_type = 'text/plain'
         self.assertTrue('Content-Type' in resp.headers)
         resp.content_type = None
-        self.assertTrue('Content-Type' not in resp.headers)
+        self.assertNotIn('Content-Type', resp.headers)
 
     def test_empty_body(self):
         resp = self._get_response()
@@ -1298,16 +1301,17 @@ class TestResponse(unittest.TestCase):
         resp = req.get_response(test_app)
         resp.conditional_response = True
         body = ''.join(resp([], start_response))
-        self.assertEqual(body, '')
-        self.assertEqual(resp.content_length, 0)
+        self.assertIn('The Range requested is not available', body)
+        self.assertEqual(resp.content_length, len(body))
         self.assertEqual(resp.status, '416 Requested Range Not Satisfiable')
+        self.assertEqual(resp.content_range, 'bytes */10')
 
         resp = swift.common.swob.Response(
             body='1234567890', request=req,
             conditional_response=True)
         body = ''.join(resp([], start_response))
-        self.assertEqual(body, '')
-        self.assertEqual(resp.content_length, 0)
+        self.assertIn('The Range requested is not available', body)
+        self.assertEqual(resp.content_length, len(body))
         self.assertEqual(resp.status, '416 Requested Range Not Satisfiable')
 
         # Syntactically-invalid Range headers "MUST" be ignored
@@ -1318,6 +1322,7 @@ class TestResponse(unittest.TestCase):
         body = ''.join(resp([], start_response))
         self.assertEqual(body, '1234567890')
         self.assertEqual(resp.status, '200 OK')
+        self.assertNotIn('Content-Range', resp.headers)
 
         resp = swift.common.swob.Response(
             body='1234567890', request=req,
@@ -1354,7 +1359,7 @@ class TestResponse(unittest.TestCase):
 
         self.assertTrue('etag' in resp.headers)
         resp.etag = None
-        self.assertTrue('etag' not in resp.headers)
+        self.assertNotIn('etag', resp.headers)
 
     def test_host_url_default(self):
         resp = self._get_response()

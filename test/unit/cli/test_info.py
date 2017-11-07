@@ -12,6 +12,7 @@
 
 """Tests for swift.cli.info"""
 
+from argparse import Namespace
 import os
 import unittest
 import mock
@@ -24,9 +25,10 @@ from test.unit import patch_policies, write_fake_ring
 from swift.common import ring, utils
 from swift.common.swob import Request
 from swift.common.storage_policy import StoragePolicy, POLICIES
-from swift.cli.info import print_db_info_metadata, print_ring_locations, \
-    print_info, print_obj_metadata, print_obj, InfoSystemExit, \
-    print_item_locations
+from swift.cli.info import (print_db_info_metadata, print_ring_locations,
+                            print_info, print_obj_metadata, print_obj,
+                            InfoSystemExit, print_item_locations,
+                            parse_get_node_args)
 from swift.account.server import AccountController
 from swift.container.server import ContainerController
 from swift.obj.diskfile import write_metadata
@@ -34,7 +36,8 @@ from swift.obj.diskfile import write_metadata
 
 @patch_policies([StoragePolicy(0, 'zero', True),
                  StoragePolicy(1, 'one', False),
-                 StoragePolicy(2, 'two', False)])
+                 StoragePolicy(2, 'two', False),
+                 StoragePolicy(3, 'three', False)])
 class TestCliInfoBase(unittest.TestCase):
     def setUp(self):
         self.orig_hp = utils.HASH_PATH_PREFIX, utils.HASH_PATH_SUFFIX
@@ -72,19 +75,22 @@ class TestCliInfoBase(unittest.TestCase):
         # ... and another for policy 2
         self.two_ring_path = os.path.join(self.testdir, 'object-2.ring.gz')
         write_fake_ring(self.two_ring_path, *object_devs)
+        # ... and one for policy 3 with some v6 IPs in it
+        object_devs_ipv6 = [
+            {'ip': 'feed:face::dead:beef', 'port': 42},
+            {'ip': 'deca:fc0f:feeb:ad11::1', 'port': 43}
+        ]
+        self.three_ring_path = os.path.join(self.testdir, 'object-3.ring.gz')
+        write_fake_ring(self.three_ring_path, *object_devs_ipv6)
 
     def tearDown(self):
         utils.HASH_PATH_PREFIX, utils.HASH_PATH_SUFFIX = self.orig_hp
         rmtree(os.path.dirname(self.testdir))
 
     def assertRaisesMessage(self, exc, msg, func, *args, **kwargs):
-        try:
+        with self.assertRaises(exc) as ctx:
             func(*args, **kwargs)
-        except Exception as e:
-            self.assertTrue(msg in str(e),
-                            "Expected %r in %r" % (msg, str(e)))
-            self.assertTrue(isinstance(e, exc),
-                            "Expected %s, got %s" % (exc, type(e)))
+        self.assertIn(msg, str(ctx.exception))
 
 
 class TestCliInfo(TestCliInfoBase):
@@ -198,9 +204,9 @@ No user metadata found in db file''' % POLICIES[0].name
             print_ring_locations(acctring, 'dir', 'acct')
         exp_db = os.path.join('${DEVICE:-/srv/node*}', 'sdb1', 'dir', '3',
                               'b47', 'dc5be2aa4347a22a0fee6bc7de505b47')
-        self.assertTrue(exp_db in out.getvalue())
-        self.assertTrue('127.0.0.1' in out.getvalue())
-        self.assertTrue('127.0.0.2' in out.getvalue())
+        self.assertIn(exp_db, out.getvalue())
+        self.assertIn('127.0.0.1', out.getvalue())
+        self.assertIn('127.0.0.2', out.getvalue())
 
     def test_print_ring_locations_container(self):
         out = StringIO()
@@ -209,7 +215,7 @@ No user metadata found in db file''' % POLICIES[0].name
             print_ring_locations(contring, 'dir', 'acct', 'con')
         exp_db = os.path.join('${DEVICE:-/srv/node*}', 'sdb1', 'dir', '1',
                               'fe6', '63e70955d78dfc62821edc07d6ec1fe6')
-        self.assertTrue(exp_db in out.getvalue())
+        self.assertIn(exp_db, out.getvalue())
 
     def test_print_ring_locations_obj(self):
         out = StringIO()
@@ -218,7 +224,7 @@ No user metadata found in db file''' % POLICIES[0].name
             print_ring_locations(objring, 'dir', 'acct', 'con', 'obj')
         exp_obj = os.path.join('${DEVICE:-/srv/node*}', 'sda1', 'dir', '1',
                                '117', '4a16154fc15c75e26ba6afadf5b1c117')
-        self.assertTrue(exp_obj in out.getvalue())
+        self.assertIn(exp_obj, out.getvalue())
 
     def test_print_ring_locations_partition_number(self):
         out = StringIO()
@@ -229,8 +235,8 @@ No user metadata found in db file''' % POLICIES[0].name
                                 'objects', '1')
         exp_obj2 = os.path.join('${DEVICE:-/srv/node*}', 'sdb1',
                                 'objects', '1')
-        self.assertTrue(exp_obj1 in out.getvalue())
-        self.assertTrue(exp_obj2 in out.getvalue())
+        self.assertIn(exp_obj1, out.getvalue())
+        self.assertIn(exp_obj2, out.getvalue())
 
     def test_print_item_locations_invalid_args(self):
         # No target specified
@@ -257,9 +263,9 @@ No user metadata found in db file''' % POLICIES[0].name
             # Test mismatch of ring and policy name (valid policy)
             self.assertRaises(InfoSystemExit, print_item_locations,
                               objring, policy_name='zero')
-        self.assertTrue('Warning: mismatch between ring and policy name!'
-                        in out.getvalue())
-        self.assertTrue('No target specified' in out.getvalue())
+        self.assertIn('Warning: mismatch between ring and policy name!',
+                      out.getvalue())
+        self.assertIn('No target specified', out.getvalue())
 
     def test_print_item_locations_invalid_policy_no_target(self):
         out = StringIO()
@@ -269,8 +275,8 @@ No user metadata found in db file''' % POLICIES[0].name
             self.assertRaises(InfoSystemExit, print_item_locations,
                               objring, policy_name=policy_name)
         exp_msg = 'Warning: Policy %s is not valid' % policy_name
-        self.assertTrue(exp_msg in out.getvalue())
-        self.assertTrue('No target specified' in out.getvalue())
+        self.assertIn(exp_msg, out.getvalue())
+        self.assertIn('No target specified', out.getvalue())
 
     def test_print_item_locations_policy_object(self):
         out = StringIO()
@@ -282,10 +288,10 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \tNone'
         exp_cont_msg = 'Container\tNone'
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_part_msg in out.getvalue())
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_part_msg, out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_dashed_ring_name_partition(self):
         out = StringIO()
@@ -298,10 +304,10 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \tNone'
         exp_cont_msg = 'Container\tNone'
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_part_msg in out.getvalue())
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_part_msg, out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_with_ring(self):
         out = StringIO()
@@ -310,16 +316,16 @@ No user metadata found in db file''' % POLICIES[0].name
             account_ring = ring.Ring(self.testdir, ring_name=account)
             print_item_locations(account_ring, account=account)
         exp_msg = 'Account  \t%s' % account
-        self.assertTrue(exp_msg in out.getvalue())
+        self.assertIn(exp_msg, out.getvalue())
         exp_warning = 'Warning: account specified ' + \
                       'but ring not named "account"'
-        self.assertTrue(exp_warning in out.getvalue())
+        self.assertIn(exp_warning, out.getvalue())
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\tNone'
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_no_ring(self):
         out = StringIO()
@@ -330,9 +336,9 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\tNone'
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_container_ring(self):
         out = StringIO()
@@ -345,9 +351,9 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\t%s' % container
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_container_no_ring(self):
         out = StringIO()
@@ -359,9 +365,9 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\t%s' % container
         exp_obj_msg = 'Object   \tNone'
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_container_object_ring(self):
         out = StringIO()
@@ -376,9 +382,9 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\t%s' % container
         exp_obj_msg = 'Object   \t%s' % obj
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_item_locations_account_container_object_dashed_ring(self):
         out = StringIO()
@@ -393,9 +399,9 @@ No user metadata found in db file''' % POLICIES[0].name
         exp_acct_msg = 'Account  \t%s' % account
         exp_cont_msg = 'Container\t%s' % container
         exp_obj_msg = 'Object   \t%s' % obj
-        self.assertTrue(exp_acct_msg in out.getvalue())
-        self.assertTrue(exp_cont_msg in out.getvalue())
-        self.assertTrue(exp_obj_msg in out.getvalue())
+        self.assertIn(exp_acct_msg, out.getvalue())
+        self.assertIn(exp_cont_msg, out.getvalue())
+        self.assertIn(exp_obj_msg, out.getvalue())
 
     def test_print_info(self):
         db_file = 'foo'
@@ -423,7 +429,7 @@ No user metadata found in db file''' % POLICIES[0].name
         if exp_raised:
             self.fail("Unexpected exception raised")
         else:
-            self.assertTrue(len(out.getvalue().strip()) > 800)
+            self.assertGreater(len(out.getvalue().strip()), 800)
 
         controller = ContainerController(
             {'devices': self.testdir, 'mount_check': 'false'})
@@ -451,7 +457,7 @@ No user metadata found in db file''' % POLICIES[0].name
         if exp_raised:
             self.fail("Unexpected exception raised")
         else:
-            self.assertTrue(len(out.getvalue().strip()) > 600)
+            self.assertGreater(len(out.getvalue().strip()), 600)
 
         out = StringIO()
         exp_raised = False
@@ -475,6 +481,379 @@ No user metadata found in db file''' % POLICIES[0].name
             self.assertEqual(out.getvalue().strip(), exp_out)
         else:
             self.fail("Expected an InfoSystemExit exception to be raised")
+
+    def test_parse_get_node_args(self):
+        # Capture error messages
+        # (without any parameters)
+        options = Namespace(policy_name=None, partition=None)
+        args = ''
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+        # a
+        options = Namespace(policy_name=None, partition=None)
+        args = 'a'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+        # a c
+        options = Namespace(policy_name=None, partition=None)
+        args = 'a c'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+        # a c o
+        options = Namespace(policy_name=None, partition=None)
+        args = 'a c o'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+
+        # a/c
+        options = Namespace(policy_name=None, partition=None)
+        args = 'a/c'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+        # a/c/o
+        options = Namespace(policy_name=None, partition=None)
+        args = 'a/c/o'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+
+        # account container junk/test.ring.gz
+        options = Namespace(policy_name=None, partition=None)
+        args = 'account container junk/test.ring.gz'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+
+        # account container object junk/test.ring.gz
+        options = Namespace(policy_name=None, partition=None)
+        args = 'account container object junk/test.ring.gz'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Need to specify policy_name or <ring.gz>',
+                                 parse_get_node_args, options, args.split())
+
+        # object.ring.gz(without any arguments i.e. a c o)
+        options = Namespace(policy_name=None, partition=None)
+        args = 'object.ring.gz'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Ring file does not exist',
+                                 parse_get_node_args, options, args.split())
+
+        # Valid policy
+        # -P zero
+        options = Namespace(policy_name='zero', partition=None)
+        args = ''
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'No target specified',
+                                 parse_get_node_args, options, args.split())
+        # -P one a/c/o
+        options = Namespace(policy_name='one', partition=None)
+        args = 'a/c/o'
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # -P one account container photos/cat.jpg
+        options = Namespace(policy_name='one', partition=None)
+        args = 'account container photos/cat.jpg'
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertEqual(args, ['account', 'container', 'photos/cat.jpg'])
+        # -P one account/container/photos/cat.jpg
+        options = Namespace(policy_name='one', partition=None)
+        args = 'account/container/photos/cat.jpg'
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertEqual(args, ['account', 'container', 'photos/cat.jpg'])
+        # -P one account/container/junk/test.ring.gz(object endswith 'ring.gz')
+        options = Namespace(policy_name='one', partition=None)
+        args = 'account/container/junk/test.ring.gz'
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertEqual(args, ['account', 'container', 'junk/test.ring.gz'])
+        # -P two a c o hooya
+        options = Namespace(policy_name='two', partition=None)
+        args = 'a c o hooya'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Invalid arguments',
+                                 parse_get_node_args, options, args.split())
+        # -P zero -p 1
+        options = Namespace(policy_name='zero', partition='1')
+        args = ''
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertFalse(args)
+        # -P one -p 1 a/c/o
+        options = Namespace(policy_name='one', partition='1')
+        args = 'a/c/o'
+        ring_path, args = parse_get_node_args(options, args.split())
+        self.assertIsNone(ring_path)
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # -P two -p 1 a c o hooya
+        options = Namespace(policy_name='two', partition='1')
+        args = 'a c o hooya'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 'Invalid arguments',
+                                 parse_get_node_args, options, args.split())
+
+        # Invalid policy
+        # -P undefined
+        options = Namespace(policy_name='undefined')
+        args = ''
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args.split())
+        # -P undefined -p 1
+        options = Namespace(policy_name='undefined', partition='1')
+        args = ''
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args.split())
+        # -P undefined a
+        options = Namespace(policy_name='undefined')
+        args = 'a'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args.split())
+        # -P undefined a c
+        options = Namespace(policy_name='undefined')
+        args = 'a c'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args.split())
+        # -P undefined a c o
+        options = Namespace(policy_name='undefined')
+        args = 'a c o'
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args.split())
+        # -P undefined a/c
+        options = Namespace(policy_name='undefined')
+        args = 'a/c'
+        # ring_path, args = parse_get_node_args(options, args.split())
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args)
+        # -P undefined a/c/o
+        options = Namespace(policy_name='undefined')
+        args = 'a/c/o'
+        # ring_path, args = parse_get_node_args(options, args.split())
+        self.assertRaisesMessage(InfoSystemExit,
+                                 "No policy named 'undefined'",
+                                 parse_get_node_args, options, args)
+
+        # Mock tests
+        # /etc/swift/object.ring.gz(without any arguments i.e. a c o)
+        options = Namespace(policy_name=None, partition=None)
+        args = '/etc/swift/object.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            self.assertRaisesMessage(
+                InfoSystemExit,
+                'No target specified',
+                parse_get_node_args, options, args.split())
+        # Similar ring_path and arguments
+        # /etc/swift/object.ring.gz /etc/swift/object.ring.gz
+        options = Namespace(policy_name=None, partition=None)
+        args = '/etc/swift/object.ring.gz /etc/swift/object.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, '/etc/swift/object.ring.gz')
+        self.assertEqual(args, ['etc', 'swift', 'object.ring.gz'])
+        # /etc/swift/object.ring.gz a/c/etc/swift/object.ring.gz
+        options = Namespace(policy_name=None, partition=None)
+        args = '/etc/swift/object.ring.gz a/c/etc/swift/object.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, '/etc/swift/object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'etc/swift/object.ring.gz'])
+        # Invalid path as mentioned in BUG#1539275
+        # /etc/swift/object.tar.gz account container object
+        options = Namespace(policy_name=None, partition=None)
+        args = '/etc/swift/object.tar.gz account container object'
+        self.assertRaisesMessage(
+            InfoSystemExit,
+            'Need to specify policy_name or <ring.gz>',
+            parse_get_node_args, options, args.split())
+
+        # object.ring.gz a/
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a/'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a'])
+        # object.ring.gz a/c
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a/c'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c'])
+        # object.ring.gz a/c/o
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a/c/o'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # object.ring.gz a/c/o/junk/test.ring.gz
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a/c/o/junk/test.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o/junk/test.ring.gz'])
+        # object.ring.gz a
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a'])
+        # object.ring.gz a c
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a c'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c'])
+        # object.ring.gz a c o
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a c o'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # object.ring.gz a c o blah blah
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a c o blah blah'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            self.assertRaisesMessage(
+                InfoSystemExit,
+                'Invalid arguments',
+                parse_get_node_args, options, args.split())
+        # object.ring.gz a/c/o/blah/blah
+        options = Namespace(policy_name=None)
+        args = 'object.ring.gz a/c/o/blah/blah'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o/blah/blah'])
+
+        # object.ring.gz -p 1
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertFalse(args)
+        # object.ring.gz -p 1 a c o
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz a c o'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # object.ring.gz -p 1 a c o forth_arg
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz a c o forth_arg'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            self.assertRaisesMessage(
+                InfoSystemExit,
+                'Invalid arguments',
+                parse_get_node_args, options, args.split())
+        # object.ring.gz -p 1 a/c/o
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz a/c/o'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # object.ring.gz -p 1 a/c/junk/test.ring.gz
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz a/c/junk/test.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'junk/test.ring.gz'])
+        # object.ring.gz -p 1 a/c/photos/cat.jpg
+        options = Namespace(policy_name=None, partition='1')
+        args = 'object.ring.gz a/c/photos/cat.jpg'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'photos/cat.jpg'])
+
+        # --all object.ring.gz a
+        options = Namespace(all=True, policy_name=None)
+        args = 'object.ring.gz a'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a'])
+        # --all object.ring.gz a c
+        options = Namespace(all=True, policy_name=None)
+        args = 'object.ring.gz a c'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c'])
+        # --all object.ring.gz a c o
+        options = Namespace(all=True, policy_name=None)
+        args = 'object.ring.gz a c o'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['a', 'c', 'o'])
+        # object.ring.gz account container photos/cat.jpg
+        options = Namespace(policy_name=None, partition=None)
+        args = 'object.ring.gz account container photos/cat.jpg'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['account', 'container', 'photos/cat.jpg'])
+        # object.ring.gz /account/container/photos/cat.jpg
+        options = Namespace(policy_name=None, partition=None)
+        args = 'object.ring.gz account/container/photos/cat.jpg'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['account', 'container', 'photos/cat.jpg'])
+        # Object name ends with 'ring.gz'
+        # object.ring.gz /account/container/junk/test.ring.gz
+        options = Namespace(policy_name=None, partition=None)
+        args = 'object.ring.gz account/container/junk/test.ring.gz'
+        with mock.patch('swift.cli.info.os.path.exists') as exists:
+            exists.return_value = True
+            ring_path, args = parse_get_node_args(options, args.split())
+        self.assertEqual(ring_path, 'object.ring.gz')
+        self.assertEqual(args, ['account', 'container', 'junk/test.ring.gz'])
 
 
 class TestPrintObj(TestCliInfoBase):
@@ -509,8 +888,8 @@ class TestPrintObj(TestCliInfoBase):
             print_obj(self.datafile, swift_dir=self.testdir)
         etag_msg = 'ETag: Not found in metadata'
         length_msg = 'Content-Length: Not found in metadata'
-        self.assertTrue(etag_msg in out.getvalue())
-        self.assertTrue(length_msg in out.getvalue())
+        self.assertIn(etag_msg, out.getvalue())
+        self.assertIn(length_msg, out.getvalue())
 
     def test_print_obj_with_policy(self):
         out = StringIO()
@@ -519,15 +898,15 @@ class TestPrintObj(TestCliInfoBase):
         etag_msg = 'ETag: Not found in metadata'
         length_msg = 'Content-Length: Not found in metadata'
         ring_loc_msg = 'ls -lah'
-        self.assertTrue(etag_msg in out.getvalue())
-        self.assertTrue(length_msg in out.getvalue())
-        self.assertTrue(ring_loc_msg in out.getvalue())
+        self.assertIn(etag_msg, out.getvalue())
+        self.assertIn(length_msg, out.getvalue())
+        self.assertIn(ring_loc_msg, out.getvalue())
 
     def test_missing_etag(self):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile)
-        self.assertTrue('ETag: Not found in metadata' in out.getvalue())
+        self.assertIn('ETag: Not found in metadata', out.getvalue())
 
 
 class TestPrintObjFullMeta(TestCliInfoBase):
@@ -550,7 +929,7 @@ class TestPrintObjFullMeta(TestCliInfoBase):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile, swift_dir=self.testdir)
-        self.assertTrue('/objects-1/' in out.getvalue())
+        self.assertIn('/objects-1/', out.getvalue())
 
     def test_print_obj_policy_index(self):
         # Check an output of policy index when current directory is in
@@ -567,7 +946,89 @@ class TestPrintObjFullMeta(TestCliInfoBase):
                 print_obj(file_name, swift_dir=self.testdir)
         finally:
             os.chdir(cwd)
-        self.assertTrue('X-Backend-Storage-Policy-Index: 1' in out.getvalue())
+        self.assertIn('X-Backend-Storage-Policy-Index: 1', out.getvalue())
+
+    def test_print_obj_curl_command_ipv4(self):
+        # Note: policy 2 has IPv4 addresses in its ring
+        datafile2 = os.path.join(
+            self.testdir,
+            'sda', 'objects-2', '1', 'ea8',
+            'db4449e025aca992307c7c804a67eea8', '1402017884.18202.data')
+        utils.mkdirs(os.path.dirname(datafile2))
+        with open(datafile2, 'wb') as fp:
+            md = {'name': '/AUTH_admin/c/obj',
+                  'Content-Type': 'application/octet-stream',
+                  'ETag': 'd41d8cd98f00b204e9800998ecf8427e',
+                  'Content-Length': 0}
+            write_metadata(fp, md)
+
+        object_ring = ring.Ring(self.testdir, ring_name='object-2')
+        part, nodes = object_ring.get_nodes('AUTH_admin', 'c', 'obj')
+        node = nodes[0]
+
+        out = StringIO()
+        hash_dir = os.path.dirname(datafile2)
+        file_name = os.path.basename(datafile2)
+
+        # Change working directory to object hash dir
+        cwd = os.getcwd()
+        try:
+            os.chdir(hash_dir)
+            with mock.patch('sys.stdout', out):
+                print_obj(file_name, swift_dir=self.testdir)
+        finally:
+            os.chdir(cwd)
+
+        exp_curl = (
+            'curl -g -I -XHEAD '
+            '"http://{host}:{port}/{device}/{part}/AUTH_admin/c/obj" '
+            '-H "X-Backend-Storage-Policy-Index: 2"').format(
+                host=node['ip'],
+                port=node['port'],
+                device=node['device'],
+                part=part)
+        self.assertIn(exp_curl, out.getvalue())
+
+    def test_print_obj_curl_command_ipv6(self):
+        # Note: policy 3 has IPv6 addresses in its ring
+        datafile3 = os.path.join(
+            self.testdir,
+            'sda', 'objects-3', '1', 'ea8',
+            'db4449e025aca992307c7c804a67eea8', '1402017884.18202.data')
+        utils.mkdirs(os.path.dirname(datafile3))
+        with open(datafile3, 'wb') as fp:
+            md = {'name': '/AUTH_admin/c/obj',
+                  'Content-Type': 'application/octet-stream',
+                  'ETag': 'd41d8cd98f00b204e9800998ecf8427e',
+                  'Content-Length': 0}
+            write_metadata(fp, md)
+
+        object_ring = ring.Ring(self.testdir, ring_name='object-3')
+        part, nodes = object_ring.get_nodes('AUTH_admin', 'c', 'obj')
+        node = nodes[0]
+
+        out = StringIO()
+        hash_dir = os.path.dirname(datafile3)
+        file_name = os.path.basename(datafile3)
+
+        # Change working directory to object hash dir
+        cwd = os.getcwd()
+        try:
+            os.chdir(hash_dir)
+            with mock.patch('sys.stdout', out):
+                print_obj(file_name, swift_dir=self.testdir)
+        finally:
+            os.chdir(cwd)
+
+        exp_curl = (
+            'curl -g -I -XHEAD '
+            '"http://[{host}]:{port}'
+            '/{device}/{part}/AUTH_admin/c/obj" ').format(
+                host=node['ip'],
+                port=node['port'],
+                device=node['device'],
+                part=part)
+        self.assertIn(exp_curl, out.getvalue())
 
     def test_print_obj_meta_and_ts_files(self):
         # verify that print_obj will also read from meta and ts files
@@ -578,7 +1039,7 @@ class TestPrintObjFullMeta(TestCliInfoBase):
             out = StringIO()
             with mock.patch('sys.stdout', out):
                 print_obj(test_file, swift_dir=self.testdir)
-            self.assertTrue('/objects-1/' in out.getvalue())
+            self.assertIn('/objects-1/', out.getvalue())
 
     def test_print_obj_no_ring(self):
         no_rings_dir = os.path.join(self.testdir, 'no_rings_here')
@@ -587,22 +1048,22 @@ class TestPrintObjFullMeta(TestCliInfoBase):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile, swift_dir=no_rings_dir)
-        self.assertTrue('d41d8cd98f00b204e9800998ecf8427e' in out.getvalue())
-        self.assertTrue('Partition' not in out.getvalue())
+        self.assertIn('d41d8cd98f00b204e9800998ecf8427e', out.getvalue())
+        self.assertNotIn('Partition', out.getvalue())
 
     def test_print_obj_policy_name_mismatch(self):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile, policy_name='two', swift_dir=self.testdir)
         ring_alert_msg = 'Warning: Ring does not match policy!'
-        self.assertTrue(ring_alert_msg in out.getvalue())
+        self.assertIn(ring_alert_msg, out.getvalue())
 
     def test_valid_etag(self):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile)
-        self.assertTrue('ETag: d41d8cd98f00b204e9800998ecf8427e (valid)'
-                        in out.getvalue())
+        self.assertIn('ETag: d41d8cd98f00b204e9800998ecf8427e (valid)',
+                      out.getvalue())
 
     def test_invalid_etag(self):
         with open(self.datafile, 'wb') as fp:
@@ -615,24 +1076,26 @@ class TestPrintObjFullMeta(TestCliInfoBase):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile)
-        self.assertTrue('ETag: badetag doesn\'t match file hash'
-                        in out.getvalue())
+        self.assertIn('ETag: badetag doesn\'t match file hash',
+                      out.getvalue())
 
     def test_unchecked_etag(self):
         out = StringIO()
         with mock.patch('sys.stdout', out):
             print_obj(self.datafile, check_etag=False)
-        self.assertTrue('ETag: d41d8cd98f00b204e9800998ecf8427e (not checked)'
-                        in out.getvalue())
+        self.assertIn('ETag: d41d8cd98f00b204e9800998ecf8427e (not checked)',
+                      out.getvalue())
 
     def test_print_obj_metadata(self):
         self.assertRaisesMessage(ValueError, 'Metadata is None',
                                  print_obj_metadata, [])
 
         def get_metadata(items):
-            md = dict(name='/AUTH_admin/c/dummy')
-            md['Content-Type'] = 'application/octet-stream'
-            md['X-Timestamp'] = 106.3
+            md = {
+                'name': '/AUTH_admin/c/dummy',
+                'Content-Type': 'application/octet-stream',
+                'X-Timestamp': 106.3,
+            }
             md.update(items)
             return md
 
@@ -648,6 +1111,8 @@ class TestPrintObjFullMeta(TestCliInfoBase):
 Content-Type: application/octet-stream
 Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
+  No metadata found
+Transient System Metadata:
   No metadata found
 User Metadata:
   X-Object-Meta-Mtime: 107.3
@@ -674,6 +1139,8 @@ Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
   X-Object-Sysmeta-Mtime: 107.3
   X-Object-Sysmeta-Name: Obj name
+Transient System Metadata:
+  No metadata found
 User Metadata:
   No metadata found
 Other Metadata:
@@ -699,6 +1166,8 @@ Content-Type: application/octet-stream
 Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
   X-Object-Sysmeta-Mtime: 107.3
+Transient System Metadata:
+  No metadata found
 User Metadata:
   X-Object-Meta-Mtime: 107.3
 Other Metadata:
@@ -719,6 +1188,8 @@ Other Metadata:
 Content-Type: application/octet-stream
 Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
+  No metadata found
+Transient System Metadata:
   No metadata found
 User Metadata:
   No metadata found
@@ -743,6 +1214,8 @@ Content-Type: application/octet-stream
 Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
   No metadata found
+Transient System Metadata:
+  No metadata found
 User Metadata:
   X-Object-Meta-Mtime: 107.3
 Other Metadata:
@@ -764,6 +1237,8 @@ Other Metadata:
 Content-Type: Not found in metadata
 Timestamp: 1970-01-01T00:01:46.300000 (%s)
 System Metadata:
+  No metadata found
+Transient System Metadata:
   No metadata found
 User Metadata:
   X-Object-Meta-Mtime: 107.3
@@ -787,10 +1262,40 @@ Content-Type: application/octet-stream
 Timestamp: Not found in metadata
 System Metadata:
   No metadata found
+Transient System Metadata:
+  No metadata found
 User Metadata:
   X-Object-Meta-Mtime: 107.3
 Other Metadata:
   No metadata found'''
+
+        self.assertEqual(out.getvalue().strip(), exp_out)
+
+        metadata = get_metadata({
+            'X-Object-Meta-Mtime': '107.3',
+            'X-Object-Sysmeta-Mtime': '106.3',
+            'X-Object-Transient-Sysmeta-Mtime': '105.3',
+            'X-Object-Mtime': '104.3',
+        })
+        out = StringIO()
+        with mock.patch('sys.stdout', out):
+            print_obj_metadata(metadata)
+        exp_out = '''Path: /AUTH_admin/c/dummy
+  Account: AUTH_admin
+  Container: c
+  Object: dummy
+  Object hash: 128fdf98bddd1b1e8695f4340e67a67a
+Content-Type: application/octet-stream
+Timestamp: 1970-01-01T00:01:46.300000 (%s)
+System Metadata:
+  X-Object-Sysmeta-Mtime: 106.3
+Transient System Metadata:
+  X-Object-Transient-Sysmeta-Mtime: 105.3
+User Metadata:
+  X-Object-Meta-Mtime: 107.3
+Other Metadata:
+  X-Object-Mtime: 104.3''' % (
+            utils.Timestamp(106.3).internal)
 
         self.assertEqual(out.getvalue().strip(), exp_out)
 

@@ -38,6 +38,54 @@ def tearDownModule():
 
 
 class TestAccount(unittest2.TestCase):
+    existing_metadata = None
+
+    @classmethod
+    def get_meta(cls):
+        def head(url, token, parsed, conn):
+            conn.request('HEAD', parsed.path, '', {'X-Auth-Token': token})
+            return check_response(conn)
+        resp = retry(head)
+        resp.read()
+        return dict((k, v) for k, v in resp.getheaders() if
+                    k.lower().startswith('x-account-meta'))
+
+    @classmethod
+    def clear_meta(cls, remove_metadata_keys):
+        def post(url, token, parsed, conn, hdr_keys):
+            headers = {'X-Auth-Token': token}
+            headers.update((k, '') for k in hdr_keys)
+            conn.request('POST', parsed.path, '', headers)
+            return check_response(conn)
+
+        for i in range(0, len(remove_metadata_keys), 90):
+            batch = remove_metadata_keys[i:i + 90]
+            resp = retry(post, batch)
+            resp.read()
+
+    @classmethod
+    def set_meta(cls, metadata):
+        def post(url, token, parsed, conn, meta_hdrs):
+            headers = {'X-Auth-Token': token}
+            headers.update(meta_hdrs)
+            conn.request('POST', parsed.path, '', headers)
+            return check_response(conn)
+
+        if not metadata:
+            return
+        resp = retry(post, metadata)
+        resp.read()
+
+    @classmethod
+    def setUpClass(cls):
+        # remove and stash any existing account user metadata before tests
+        cls.existing_metadata = cls.get_meta()
+        cls.clear_meta(cls.existing_metadata.keys())
+
+    @classmethod
+    def tearDownClass(cls):
+        # replace any stashed account user metadata
+        cls.set_meta(cls.existing_metadata)
 
     def setUp(self):
         self.max_meta_count = load_constraint('max_meta_count')
@@ -45,35 +93,10 @@ class TestAccount(unittest2.TestCase):
         self.max_meta_overall_size = load_constraint('max_meta_overall_size')
         self.max_meta_value_length = load_constraint('max_meta_value_length')
 
-        def head(url, token, parsed, conn):
-            conn.request('HEAD', parsed.path, '', {'X-Auth-Token': token})
-            return check_response(conn)
-        resp = retry(head)
-        self.existing_metadata = set([
-            k for k, v in resp.getheaders() if
-            k.lower().startswith('x-account-meta')])
-
     def tearDown(self):
-        def head(url, token, parsed, conn):
-            conn.request('HEAD', parsed.path, '', {'X-Auth-Token': token})
-            return check_response(conn)
-        resp = retry(head)
-        resp.read()
-        new_metadata = set(
-            [k for k, v in resp.getheaders() if
-             k.lower().startswith('x-account-meta')])
-
-        def clear_meta(url, token, parsed, conn, remove_metadata_keys):
-            headers = {'X-Auth-Token': token}
-            headers.update((k, '') for k in remove_metadata_keys)
-            conn.request('POST', parsed.path, '', headers)
-            return check_response(conn)
-        extra_metadata = list(self.existing_metadata ^ new_metadata)
-        for i in range(0, len(extra_metadata), 90):
-            batch = extra_metadata[i:i + 90]
-            resp = retry(clear_meta, batch)
-            resp.read()
-            self.assertEqual(resp.status // 100, 2)
+        # clean up any account user metadata created by test
+        new_metadata = self.get_meta().keys()
+        self.clear_meta(new_metadata)
 
     def test_metadata(self):
         if tf.skip:
@@ -98,11 +121,11 @@ class TestAccount(unittest2.TestCase):
         resp = retry(head)
         resp.read()
         self.assertIn(resp.status, (200, 204))
-        self.assertEqual(resp.getheader('x-account-meta-test'), None)
+        self.assertIsNone(resp.getheader('x-account-meta-test'))
         resp = retry(get)
         resp.read()
         self.assertIn(resp.status, (200, 204))
-        self.assertEqual(resp.getheader('x-account-meta-test'), None)
+        self.assertIsNone(resp.getheader('x-account-meta-test'))
         resp = retry(post, 'Value')
         resp.read()
         self.assertEqual(resp.status, 204)
@@ -164,7 +187,7 @@ class TestAccount(unittest2.TestCase):
         resp = retry(post, headers, use_account=1)
         resp.read()
         self.assertEqual(resp.status, 400)
-        self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+        self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
     @requires_acls
     def test_invalid_acl_values(self):
@@ -180,7 +203,7 @@ class TestAccount(unittest2.TestCase):
         resp = retry(post, headers=headers, use_account=1)
         resp.read()
         self.assertEqual(resp.status, 400)
-        self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+        self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
     @requires_acls
     def test_read_only_acl(self):
@@ -215,7 +238,7 @@ class TestAccount(unittest2.TestCase):
         resp.read()
         self.assertIn(resp.status, (200, 204))
         # but not acls
-        self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+        self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
         # read-only can not write metadata
         headers = {'x-account-meta-test': 'value'}
@@ -266,7 +289,7 @@ class TestAccount(unittest2.TestCase):
         resp.read()
         self.assertIn(resp.status, (200, 204))
         # but not acls
-        self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+        self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
         # read-write can not write account metadata
         headers = {'x-account-meta-test': 'value'}
@@ -368,12 +391,11 @@ class TestAccount(unittest2.TestCase):
         # read-only tester3 can read account metadata
         resp = retry(get, use_account=3)
         resp.read()
-        self.assertTrue(
-            resp.status in (200, 204),
-            'Expected status in (200, 204), got %s' % resp.status)
+        self.assertIn(resp.status, (200, 204),
+                      'Expected status in (200, 204), got %s' % resp.status)
         self.assertEqual(resp.getheader('X-Account-Meta-Test'), value)
         # but not temp-url-key
-        self.assertEqual(resp.getheader('X-Account-Meta-Temp-Url-Key'), None)
+        self.assertIsNone(resp.getheader('X-Account-Meta-Temp-Url-Key'))
 
         # grant read-write access to tester3
         acl_user = tf.swift_test_user[2]
@@ -387,12 +409,11 @@ class TestAccount(unittest2.TestCase):
         # read-write tester3 can read account metadata
         resp = retry(get, use_account=3)
         resp.read()
-        self.assertTrue(
-            resp.status in (200, 204),
-            'Expected status in (200, 204), got %s' % resp.status)
+        self.assertIn(resp.status, (200, 204),
+                      'Expected status in (200, 204), got %s' % resp.status)
         self.assertEqual(resp.getheader('X-Account-Meta-Test'), value)
         # but not temp-url-key
-        self.assertEqual(resp.getheader('X-Account-Meta-Temp-Url-Key'), None)
+        self.assertIsNone(resp.getheader('X-Account-Meta-Temp-Url-Key'))
 
         # grant admin access to tester3
         acl_user = tf.swift_test_user[2]
@@ -406,9 +427,8 @@ class TestAccount(unittest2.TestCase):
         # admin tester3 can read account metadata
         resp = retry(get, use_account=3)
         resp.read()
-        self.assertTrue(
-            resp.status in (200, 204),
-            'Expected status in (200, 204), got %s' % resp.status)
+        self.assertIn(resp.status, (200, 204),
+                      'Expected status in (200, 204), got %s' % resp.status)
         self.assertEqual(resp.getheader('X-Account-Meta-Test'), value)
         # including temp-url-key
         self.assertEqual(resp.getheader('X-Account-Meta-Temp-Url-Key'),
@@ -424,9 +444,8 @@ class TestAccount(unittest2.TestCase):
         self.assertEqual(resp.status, 204)
         resp = retry(get, use_account=3)
         resp.read()
-        self.assertTrue(
-            resp.status in (200, 204),
-            'Expected status in (200, 204), got %s' % resp.status)
+        self.assertIn(resp.status, (200, 204),
+                      'Expected status in (200, 204), got %s' % resp.status)
         self.assertEqual(resp.getheader('X-Account-Meta-Temp-Url-Key'),
                          secret)
 
@@ -464,13 +483,13 @@ class TestAccount(unittest2.TestCase):
                          use_account=1)
             resp.read()
             self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User1 can GET their own empty account
             resp = retry(get, use_account=1)
             resp.read()
             self.assertEqual(resp.status // 100, 2)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User2 can't GET User1's account
             resp = retry(get, use_account=2, url_account=1)
@@ -514,7 +533,7 @@ class TestAccount(unittest2.TestCase):
             resp = retry(head, use_account=2, url_account=1)
             resp.read()
             self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.getheader('x-account-access-control'), None)
+            self.assertIsNone(resp.getheader('x-account-access-control'))
 
             # User2 can PUT and DELETE a container
             resp = retry(put, use_account=2, url_account=1,
@@ -539,7 +558,7 @@ class TestAccount(unittest2.TestCase):
             resp = retry(head, use_account=2, url_account=1)
             resp.read()
             self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.getheader('x-account-access-control'), None)
+            self.assertIsNone(resp.getheader('x-account-access-control'))
 
             # User2 can't PUT a container
             resp = retry(put, use_account=2, url_account=1,
@@ -577,13 +596,13 @@ class TestAccount(unittest2.TestCase):
             resp = retry(post, headers={'X-Account-Access-Control': '{}'})
             resp.read()
             self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User1 can GET their own empty account
             resp = retry(get)
             resp.read()
             self.assertEqual(resp.status // 100, 2)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User1 can POST non-empty data
             acl_json = '{"admin":["bob"]}'
@@ -636,13 +655,13 @@ class TestAccount(unittest2.TestCase):
             resp = retry(post, headers={'X-Account-Access-Control': '{}'})
             resp.read()
             self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User1 can GET their own empty account
             resp = retry(get)
             resp.read()
             self.assertEqual(resp.status // 100, 2)
-            self.assertEqual(resp.getheader('X-Account-Access-Control'), None)
+            self.assertIsNone(resp.getheader('X-Account-Access-Control'))
 
             # User1 can POST non-empty data
             acl_json = '{"admin":["bob"]}'
@@ -797,11 +816,6 @@ class TestAccount(unittest2.TestCase):
             headers.update(extra_headers)
             conn.request('POST', parsed.path, '', headers)
             return check_response(conn)
-
-        # TODO: Find the test that adds these and remove them.
-        headers = {'x-remove-account-meta-temp-url-key': 'remove',
-                   'x-remove-account-meta-temp-url-key-2': 'remove'}
-        resp = retry(post, headers)
 
         headers = {}
         for x in range(self.max_meta_count):

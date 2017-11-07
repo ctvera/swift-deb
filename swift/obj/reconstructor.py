@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import errno
 import os
 from os.path import join
 import random
@@ -77,8 +79,7 @@ class RebuildingECDiskFileStream(object):
         self.datafile_metadata = datafile_metadata
 
         # the new FA is going to have the same length as others in the set
-        self._content_length = self.datafile_metadata['Content-Length']
-
+        self._content_length = int(self.datafile_metadata['Content-Length'])
         # update the FI and delete the ETag, the obj server will
         # recalc on the other side...
         self.datafile_metadata['X-Object-Sysmeta-Ec-Frag-Index'] = frag_index
@@ -132,7 +133,6 @@ class ObjectReconstructor(Daemon):
         self.stats_interval = int(conf.get('stats_interval', '300'))
         self.ring_check_interval = int(conf.get('ring_check_interval', 15))
         self.next_check = time.time() + self.ring_check_interval
-        self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
         self.partition_times = []
         self.interval = int(conf.get('interval') or
                             conf.get('run_pause') or 30)
@@ -149,8 +149,24 @@ class ObjectReconstructor(Daemon):
         self.headers = {
             'Content-Length': '0',
             'user-agent': 'obj-reconstructor %s' % os.getpid()}
-        self.handoffs_first = config_true_value(conf.get('handoffs_first',
-                                                         False))
+        if 'handoffs_first' in conf:
+            self.logger.warning(
+                'The handoffs_first option is deprecated in favor '
+                'of handoffs_only.  This option may be ignored in a '
+                'future release.')
+            # honor handoffs_first for backwards compatibility
+            default_handoffs_only = config_true_value(conf['handoffs_first'])
+        else:
+            default_handoffs_only = False
+        self.handoffs_only = config_true_value(
+            conf.get('handoffs_only', default_handoffs_only))
+        if self.handoffs_only:
+            self.logger.warning(
+                'Handoff only mode is not intended for normal '
+                'operation, use handoffs_only with care.')
+        elif default_handoffs_only:
+            self.logger.warning('Ignored handoffs_first option in favor '
+                                'of handoffs_only.')
         self._df_router = DiskFileRouter(conf, self.logger)
 
     def load_object_ring(self, policy):
@@ -245,9 +261,15 @@ class ObjectReconstructor(Daemon):
         # of the node we're rebuilding to within the primary part list
         fi_to_rebuild = node['index']
 
-        # KISS send out connection requests to all nodes, see what sticks
+        # KISS send out connection requests to all nodes, see what sticks.
+        # Use fragment preferences header to tell other nodes that we want
+        # fragments at the same timestamp as our fragment, and that they don't
+        # need to be durable.
         headers = self.headers.copy()
         headers['X-Backend-Storage-Policy-Index'] = int(job['policy'])
+        frag_prefs = [{'timestamp': datafile_metadata['X-Timestamp'],
+                       'exclude': []}]
+        headers['X-Backend-Fragment-Preferences'] = json.dumps(frag_prefs)
         pile = GreenAsyncPile(len(part_nodes))
         path = datafile_metadata['name']
         for node in part_nodes:
@@ -348,7 +370,7 @@ class ObjectReconstructor(Daemon):
                 self.reconstruction_device_count):
             elapsed = (time.time() - self.start) or 0.000001
             rate = self.reconstruction_part_count / elapsed
-            total_part_count = (self.part_count *
+            total_part_count = (1.0 * self.part_count *
                                 self.device_count /
                                 self.reconstruction_device_count)
             self.logger.info(
@@ -425,7 +447,7 @@ class ObjectReconstructor(Daemon):
         df_mgr = self._df_router[policy]
         hashed, suffix_hashes = tpool_reraise(
             df_mgr._get_hashes, path, recalculate=recalculate,
-            do_listdir=do_listdir, reclaim_age=self.reclaim_age)
+            do_listdir=do_listdir)
         self.logger.update_stats('suffix.hashes', hashed)
         return suffix_hashes
 
@@ -638,30 +660,20 @@ class ObjectReconstructor(Daemon):
         """
         self.logger.increment(
             'partition.delete.count.%s' % (job['local_dev']['device'],))
-        # we'd desperately like to push this partition back to it's
-        # primary location, but if that node is down, the next best thing
-        # is one of the handoff locations - which *might* be us already!
-        dest_nodes = itertools.chain(
-            job['sync_to'],
-            job['policy'].object_ring.get_more_nodes(job['partition']),
-        )
         syncd_with = 0
         reverted_objs = {}
-        for node in dest_nodes:
-            if syncd_with >= len(job['sync_to']):
-                break
-            if node['id'] == job['local_dev']['id']:
-                # this is as good a place as any for this data for now
-                break
+        for node in job['sync_to']:
             success, in_sync_objs = ssync_sender(
                 self, node, job, job['suffixes'])()
-            self.rehash_remote(node, job, job['suffixes'])
             if success:
+                self.rehash_remote(node, job, job['suffixes'])
                 syncd_with += 1
                 reverted_objs.update(in_sync_objs)
         if syncd_with >= len(job['sync_to']):
             self.delete_reverted_objs(
                 job, reverted_objs, job['frag_index'])
+        else:
+            self.handoffs_remaining += 1
         self.logger.timing_since('partition.delete.timing', begin)
 
     def _get_part_jobs(self, local_dev, part_path, partition, policy):
@@ -690,9 +702,19 @@ class ObjectReconstructor(Daemon):
         :param policy: the policy
 
         :returns: a list of dicts of job info
+
+        N.B. If this function ever returns an empty list of jobs the entire
+        partition will be deleted.
         """
         # find all the fi's in the part, and which suffixes have them
-        hashes = self._get_hashes(policy, part_path, do_listdir=True)
+        try:
+            hashes = self._get_hashes(policy, part_path, do_listdir=True)
+        except OSError as e:
+            if e.errno != errno.ENOTDIR:
+                raise
+            self.logger.warning(
+                'Unexpected entity %r is not a directory' % part_path)
+            return []
         non_data_fragment_suffixes = []
         data_fi_to_suffixes = defaultdict(list)
         for suffix, fi_hash in hashes.items():
@@ -794,12 +816,13 @@ class ObjectReconstructor(Daemon):
         override_devices = override_devices or []
         override_partitions = override_partitions or []
         ips = whataremyips(self.bind_ip)
-        for policy in POLICIES:
-            if policy.policy_type != EC_POLICY:
-                continue
-            self._diskfile_mgr = self._df_router[policy]
+        ec_policies = (policy for policy in POLICIES
+                       if policy.policy_type == EC_POLICY)
+
+        policy2devices = {}
+
+        for policy in ec_policies:
             self.load_object_ring(policy)
-            data_dir = get_data_dir(policy)
             local_devices = list(six.moves.filter(
                 lambda dev: dev and is_local_device(
                     ips, self.port,
@@ -807,25 +830,29 @@ class ObjectReconstructor(Daemon):
                 policy.object_ring.devs))
 
             if override_devices:
-                self.device_count = len(override_devices)
-            else:
-                self.device_count = len(local_devices)
+                local_devices = list(six.moves.filter(
+                    lambda dev_info: dev_info['device'] in override_devices,
+                    local_devices))
 
+            policy2devices[policy] = local_devices
+            self.device_count += len(local_devices)
+
+        all_parts = []
+
+        for policy, local_devices in policy2devices.items():
+            df_mgr = self._df_router[policy]
             for local_dev in local_devices:
-                if override_devices and (local_dev['device'] not in
-                                         override_devices):
-                    continue
                 self.reconstruction_device_count += 1
-                dev_path = self._df_router[policy].get_dev_path(
-                    local_dev['device'])
+                dev_path = df_mgr.get_dev_path(local_dev['device'])
                 if not dev_path:
                     self.logger.warning(_('%s is not mounted'),
                                         local_dev['device'])
                     continue
+                data_dir = get_data_dir(policy)
                 obj_path = join(dev_path, data_dir)
                 tmp_path = join(dev_path, get_tmp_dir(int(policy)))
                 unlink_older_than(tmp_path, time.time() -
-                                  self.reclaim_age)
+                                  df_mgr.reclaim_age)
                 if not os.path.exists(obj_path):
                     try:
                         mkdirs(obj_path)
@@ -846,8 +873,7 @@ class ObjectReconstructor(Daemon):
                     if partition in ('auditor_status_ALL.json',
                                      'auditor_status_ZBF.json'):
                         continue
-                    if not (partition.isdigit() and
-                            os.path.isdir(part_path)):
+                    if not partition.isdigit():
                         self.logger.warning(
                             'Unexpected entity in data dir: %r' % part_path)
                         remove_file(part_path)
@@ -863,19 +889,20 @@ class ObjectReconstructor(Daemon):
                         'partition': partition,
                         'part_path': part_path,
                     }
-                    yield part_info
-                    self.reconstruction_part_count += 1
+                    all_parts.append(part_info)
+        random.shuffle(all_parts)
+        return all_parts
 
     def build_reconstruction_jobs(self, part_info):
         """
         Helper function for collect_jobs to build jobs for reconstruction
         using EC style storage policy
+
+        N.B. If this function ever returns an empty list of jobs the entire
+        partition will be deleted.
         """
         jobs = self._get_part_jobs(**part_info)
         random.shuffle(jobs)
-        if self.handoffs_first:
-            # Move the handoff revert jobs to the front of the list
-            jobs.sort(key=lambda job: job['job_type'], reverse=True)
         self.job_count += len(jobs)
         return jobs
 
@@ -891,10 +918,12 @@ class ObjectReconstructor(Daemon):
         self.reconstruction_part_count = 0
         self.reconstruction_device_count = 0
         self.last_reconstruction_count = -1
+        self.handoffs_remaining = 0
 
     def delete_partition(self, path):
         self.logger.info(_("Removing partition: %s"), path)
         tpool.execute(shutil.rmtree, path, ignore_errors=True)
+        remove_file(path)
 
     def reconstruct(self, **kwargs):
         """Run a reconstruction pass"""
@@ -912,6 +941,7 @@ class ObjectReconstructor(Daemon):
                     self.logger.info(_("Ring change detected. Aborting "
                                        "current reconstruction pass."))
                     return
+                self.reconstruction_part_count += 1
                 jobs = self.build_reconstruction_jobs(part_info)
                 if not jobs:
                     # If this part belongs on this node, _get_part_jobs
@@ -924,6 +954,11 @@ class ObjectReconstructor(Daemon):
                     self.run_pool.spawn(self.delete_partition,
                                         part_info['part_path'])
                 for job in jobs:
+                    if (self.handoffs_only and job['job_type'] != REVERT):
+                        self.logger.debug('Skipping %s job for %s '
+                                          'while in handoffs_only mode.',
+                                          job['job_type'], job['path'])
+                        continue
                     self.run_pool.spawn(self.process_job, job)
             with Timeout(self.lockup_timeout):
                 self.run_pool.waitall()
@@ -935,6 +970,16 @@ class ObjectReconstructor(Daemon):
             stats.kill()
             lockup_detector.kill()
             self.stats_line()
+        if self.handoffs_only:
+            if self.handoffs_remaining > 0:
+                self.logger.info(_(
+                    "Handoffs only mode still has handoffs remaining.  "
+                    "Next pass will continue to revert handoffs."))
+            else:
+                self.logger.warning(_(
+                    "Handoffs only mode found no handoffs remaining.  "
+                    "You should disable handoffs_only once all nodes "
+                    "are reporting no handoffs remaining."))
 
     def run_once(self, *args, **kwargs):
         start = time.time()

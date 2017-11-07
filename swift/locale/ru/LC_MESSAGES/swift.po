@@ -6,20 +6,20 @@
 # Andreas Jaeger <jaegerandi@gmail.com>, 2016. #zanata
 msgid ""
 msgstr ""
-"Project-Id-Version: swift 2.7.1.dev169\n"
+"Project-Id-Version: swift 2.13.1.dev7\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2016-06-02 04:58+0000\n"
+"POT-Creation-Date: 2017-04-21 19:40+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"PO-Revision-Date: 2016-03-27 11:17+0000\n"
-"Last-Translator: Ilya Alekseyev <ilyaalekseyev@acm.org>\n"
+"PO-Revision-Date: 2016-04-12 06:43+0000\n"
+"Last-Translator: Copied by Zanata <copied-by-zanata@zanata.org>\n"
 "Language: ru\n"
 "Plural-Forms: nplurals=4; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n"
 "%10<=4 && (n%100<12 || n%100>14) ? 1 : n%10==0 || (n%10>=5 && n%10<=9) || (n"
 "%100>=11 && n%100<=14)? 2 : 3);\n"
 "Generated-By: Babel 2.0\n"
-"X-Generator: Zanata 3.7.3\n"
+"X-Generator: Zanata 3.9.6\n"
 "Language-Team: Russian\n"
 
 msgid ""
@@ -45,22 +45,8 @@ msgstr ""
 "синхронизировано: %(synced).2f%%"
 
 #, python-format
-msgid "%(ip)s/%(device)s responded as unmounted"
-msgstr "Ответили как размонтированные: %(ip)s/%(device)s"
-
-#, python-format
 msgid "%(msg)s %(ip)s:%(port)s/%(device)s"
 msgstr "%(msg)s %(ip)s:%(port)s/%(device)s"
-
-#, python-format
-msgid ""
-"%(reconstructed)d/%(total)d (%(percentage).2f%%) partitions of %(device)d/"
-"%(dtotal)d (%(dpercentage).2f%%) devices reconstructed in %(time).2fs "
-"(%(rate).2f/sec, %(remaining)s remaining)"
-msgstr ""
-"Реконструированно разделов: %(reconstructed)d/%(total)d (%(percentage).2f%%) "
-"partitions of %(device)d/%(dtotal)d (%(dpercentage).2f%%) за время "
-"%(time).2fs (%(rate).2f/sec, осталось: %(remaining)s)"
 
 #, python-format
 msgid ""
@@ -288,12 +274,6 @@ msgstr "Ошибка %(status)d %(body)s, ответ от сервера объ�
 #, python-format
 msgid "ERROR %(status)d Expect: 100-continue From Object Server"
 msgstr "Ошибка %(status)d. Ожидаемое значение от сервера объекта: 100-continue"
-
-#, python-format
-msgid "ERROR %(status)d Trying to %(method)s %(path)sFrom Container Server"
-msgstr ""
-"Ошибка %(status)d. попытка выполнить метод %(method)s %(path)s из сервера "
-"контейнера"
 
 #, python-format
 msgid ""
@@ -929,10 +909,6 @@ msgstr "Попытка выполнения метода %(method)s %(path)s"
 #, python-format
 msgid "Trying to GET %(full_path)s"
 msgstr "Попытка GET-запроса %(full_path)s"
-
-#, python-format
-msgid "Trying to get final status of PUT to %s"
-msgstr "Попытка получения конечного состояния PUT в %s"
 
 msgid "Trying to read during GET"
 msgstr "Попытка чтения во время операции GET"

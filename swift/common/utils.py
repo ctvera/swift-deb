@@ -31,7 +31,9 @@ import sys
 import time
 import uuid
 import functools
+import platform
 import email.parser
+from distutils.version import LooseVersion
 from hashlib import md5, sha1
 from random import random, shuffle
 from contextlib import contextmanager, closing
@@ -68,6 +70,7 @@ import swift.common.exceptions
 from swift.common.http import is_success, is_redirection, HTTP_NOT_FOUND, \
     HTTP_PRECONDITION_FAILED, HTTP_REQUESTED_RANGE_NOT_SATISFIABLE
 from swift.common.header_key_dict import HeaderKeyDict
+from swift.common.linkat import linkat
 
 if six.PY3:
     stdlib_queue = eventlet.patcher.original('queue')
@@ -92,6 +95,10 @@ _posix_fadvise = None
 _libc_socket = None
 _libc_bind = None
 _libc_accept = None
+# see man -s 2 setpriority
+_libc_setpriority = None
+# see man -s 2 syscall
+_posix_syscall = None
 
 # If set to non-zero, fallocate routines will fail based on free space
 # available being at or below this amount, in bytes.
@@ -99,6 +106,55 @@ FALLOCATE_RESERVE = 0
 # Indicates if FALLOCATE_RESERVE is the percentage of free space (True) or
 # the number of bytes (False).
 FALLOCATE_IS_PERCENT = False
+
+# from /usr/src/linux-headers-*/include/uapi/linux/resource.h
+PRIO_PROCESS = 0
+
+
+# /usr/include/x86_64-linux-gnu/asm/unistd_64.h defines syscalls there
+# are many like it, but this one is mine, see man -s 2 ioprio_set
+def NR_ioprio_set():
+    """Give __NR_ioprio_set value for your system."""
+    architecture = os.uname()[4]
+    arch_bits = platform.architecture()[0]
+    # check if supported system, now support x86_64 and AArch64
+    if architecture == 'x86_64' and arch_bits == '64bit':
+        return 251
+    elif architecture == 'aarch64' and arch_bits == '64bit':
+        return 30
+    raise OSError("Swift doesn't support ionice priority for %s %s" %
+                  (architecture, arch_bits))
+
+# this syscall integer probably only works on x86_64 linux systems, you
+# can check if it's correct on yours with something like this:
+"""
+#include <stdio.h>
+#include <sys/syscall.h>
+
+int main(int argc, const char* argv[]) {
+    printf("%d\n", __NR_ioprio_set);
+    return 0;
+}
+"""
+
+# this is the value for "which" that says our who value will be a pid
+# pulled out of /usr/src/linux-headers-*/include/linux/ioprio.h
+IOPRIO_WHO_PROCESS = 1
+
+
+IO_CLASS_ENUM = {
+    'IOPRIO_CLASS_RT': 1,
+    'IOPRIO_CLASS_BE': 2,
+    'IOPRIO_CLASS_IDLE': 3,
+}
+
+# the IOPRIO_PRIO_VALUE "macro" is also pulled from
+# /usr/src/linux-headers-*/include/linux/ioprio.h
+IOPRIO_CLASS_SHIFT = 13
+
+
+def IOPRIO_PRIO_VALUE(class_, data):
+    return (((class_) << IOPRIO_CLASS_SHIFT) | data)
 
 # Used by hash_path to offer a bit more security when generating hashes for
 # paths. It simply appends this value to all paths; guessing the hash a path
@@ -111,9 +167,10 @@ SWIFT_CONF_FILE = '/etc/swift/swift.conf'
 # These constants are Linux-specific, and Python doesn't seem to know
 # about them. We ask anyway just in case that ever gets fixed.
 #
-# The values were copied from the Linux 3.0 kernel headers.
+# The values were copied from the Linux 3.x kernel headers.
 AF_ALG = getattr(socket, 'AF_ALG', 38)
 F_SETPIPE_SZ = getattr(fcntl, 'F_SETPIPE_SZ', 1031)
+O_TMPFILE = getattr(os, 'O_TMPFILE', 0o20000000 | os.O_DIRECTORY)
 
 # Used by the parse_socket_string() function to validate IPv6 addresses
 IPV6_RE = re.compile("^\[(?P<address>.*)\](:(?P<port>[0-9]+))?$")
@@ -382,7 +439,7 @@ def validate_configuration():
 
 
 def load_libc_function(func_name, log_error=True,
-                       fail_if_missing=False):
+                       fail_if_missing=False, errcheck=False):
     """
     Attempt to find the function in libc, otherwise return a no-op func.
 
@@ -390,10 +447,13 @@ def load_libc_function(func_name, log_error=True,
     :param log_error: log an error when a function can't be found
     :param fail_if_missing: raise an exception when a function can't be found.
                             Default behavior is to return a no-op function.
+    :param errcheck: boolean, if true install a wrapper on the function
+                     to check for a return values of -1 and call
+                     ctype.get_errno and raise an OSError
     """
     try:
         libc = ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)
-        return getattr(libc, func_name)
+        func = getattr(libc, func_name)
     except AttributeError:
         if fail_if_missing:
             raise
@@ -401,6 +461,14 @@ def load_libc_function(func_name, log_error=True,
             logging.warning(_("Unable to locate %s in libc.  Leaving as a "
                             "no-op."), func_name)
         return noop_libc_function
+    if errcheck:
+        def _errcheck(result, f, args):
+            if result == -1:
+                errcode = ctypes.get_errno()
+                raise OSError(errcode, os.strerror(errcode))
+            return result
+        func.errcheck = _errcheck
+    return func
 
 
 def generate_trans_id(trans_id_suffix):
@@ -1133,6 +1201,47 @@ def renamer(old, new, fsync=True):
             dirpath = os.path.dirname(dirpath)
 
 
+def link_fd_to_path(fd, target_path, dirs_created=0, retries=2, fsync=True):
+    """
+    Creates a link to file descriptor at target_path specified. This method
+    does not close the fd for you. Unlike rename, as linkat() cannot
+    overwrite target_path if it exists, we unlink and try again.
+
+    Attempts to fix / hide race conditions like empty object directories
+    being removed by backend processes during uploads, by retrying.
+
+    :param fd: File descriptor to be linked
+    :param target_path: Path in filesystem where fd is to be linked
+    :param dirs_created: Number of newly created directories that needs to
+                         be fsync'd.
+    :param retries: number of retries to make
+    :param fsync: fsync on containing directory of target_path and also all
+                  the newly created directories.
+    """
+    dirpath = os.path.dirname(target_path)
+    for _junk in range(0, retries):
+        try:
+            linkat(linkat.AT_FDCWD, "/proc/self/fd/%d" % (fd),
+                   linkat.AT_FDCWD, target_path, linkat.AT_SYMLINK_FOLLOW)
+            break
+        except IOError as err:
+            if err.errno == errno.ENOENT:
+                dirs_created = makedirs_count(dirpath)
+            elif err.errno == errno.EEXIST:
+                try:
+                    os.unlink(target_path)
+                except OSError as e:
+                    if e.errno != errno.ENOENT:
+                        raise
+            else:
+                raise
+
+    if fsync:
+        for i in range(0, dirs_created + 1):
+            fsync_dir(dirpath)
+            dirpath = os.path.dirname(dirpath)
+
+
 def split_path(path, minsegs=1, maxsegs=None, rest_with_last=False):
     """
     Validate and split the given HTTP request path.
@@ -1258,6 +1367,27 @@ class NullLogger(object):
 
     def write(self, *args):
         # "Logs" the args to nowhere
+        pass
+
+    def exception(self, *args):
+        pass
+
+    def critical(self, *args):
+        pass
+
+    def error(self, *args):
+        pass
+
+    def warning(self, *args):
+        pass
+
+    def info(self, *args):
+        pass
+
+    def debug(self, *args):
+        pass
+
+    def log(self, *args):
         pass
 
 
@@ -1420,8 +1550,8 @@ class StatsdClient(object):
             except IOError as err:
                 if self.logger:
                     self.logger.warning(
-                        'Error sending UDP message to %r: %s',
-                        self._target, err)
+                        _('Error sending UDP message to %(target)r: %(err)s'),
+                        {'target': self._target, 'err': err})
 
     def _open_socket(self):
         return socket.socket(self._sock_family, socket.SOCK_DGRAM)
@@ -1920,6 +2050,35 @@ def parse_options(parser=None, once=False, test_args=None):
     return config, options
 
 
+def is_valid_ip(ip):
+    """
+    Return True if the provided ip is a valid IP-address
+    """
+    return is_valid_ipv4(ip) or is_valid_ipv6(ip)
+
+
+def is_valid_ipv4(ip):
+    """
+    Return True if the provided ip is a valid IPv4-address
+    """
+    try:
+        socket.inet_pton(socket.AF_INET, ip)
+    except socket.error:  # not a valid IPv4 address
+        return False
+    return True
+
+
+def is_valid_ipv6(ip):
+    """
+    Returns True if the provided ip is a valid IPv6-address
+    """
+    try:
+        socket.inet_pton(socket.AF_INET6, ip)
+    except socket.error:  # not a valid IPv6 address
+        return False
+    return True
+
+
 def expand_ipv6(address):
     """
     Expand ipv6 address.
@@ -2259,6 +2418,8 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
                      not defined)
     :param defaults: dict of default values to pre-populate the config with
     :returns: dict of config items
+    :raises ValueError: if section_name does not exist
+    :raises IOError: if reading the file failed
     """
     if defaults is None:
         defaults = {}
@@ -2275,15 +2436,15 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
         else:
             success = c.read(conf_path)
         if not success:
-            print(_("Unable to read config from %s") % conf_path)
-            sys.exit(1)
+            raise IOError(_("Unable to read config from %s") %
+                          conf_path)
     if section_name:
         if c.has_section(section_name):
             conf = dict(c.items(section_name))
         else:
-            print(_("Unable to find %(section)s config section in %(conf)s") %
-                  {'section': section_name, 'conf': conf_path})
-            sys.exit(1)
+            raise ValueError(
+                _("Unable to find %(section)s config section in %(conf)s") %
+                {'section': section_name, 'conf': conf_path})
         if "log_name" not in conf:
             if log_name is not None:
                 conf['log_name'] = log_name
@@ -2312,6 +2473,7 @@ def write_pickle(obj, dest, tmp=None, pickle_protocol=0):
     """
     if tmp is None:
         tmp = os.path.dirname(dest)
+    mkdirs(tmp)
     fd, tmppath = mkstemp(dir=tmp, suffix='.tmp')
     with os.fdopen(fd, 'wb') as fo:
         pickle.dump(obj, fo, pickle_protocol)
@@ -2424,7 +2586,8 @@ def audit_location_generator(devices, datadir, suffix='',
             partitions = listdir(datadir_path)
         except OSError as e:
             if logger:
-                logger.warning('Skipping %s because %s', datadir_path, e)
+                logger.warning(_('Skipping %(datadir)s because %(err)s'),
+                               {'datadir': datadir_path, 'err': e})
             continue
         for partition in partitions:
             part_path = os.path.join(datadir_path, partition)
@@ -2899,13 +3062,15 @@ def put_recon_cache_entry(cache_entry, key, item):
         cache_entry[key] = item
 
 
-def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2):
+def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2,
+                     set_owner=None):
     """Update recon cache values
 
     :param cache_dict: Dictionary of cache key/value pairs to write out
     :param cache_file: cache file to update
     :param logger: the logger to use to log an encountered error
     :param lock_timeout: timeout (in seconds)
+    :param set_owner: Set owner of recon cache file
     """
     try:
         with lock_file(cache_file, lock_timeout, unlink=False) as cf:
@@ -2924,6 +3089,8 @@ def dump_recon_cache(cache_dict, cache_file, logger, lock_timeout=2):
                 with NamedTemporaryFile(dir=os.path.dirname(cache_file),
                                         delete=False) as tf:
                     tf.write(json.dumps(cache_entry) + '\n')
+                if set_owner:
+                    os.chown(tf.name, pwd.getpwnam(set_owner).pw_uid, -1)
                 renamer(tf.name, cache_file, fsync=False)
             finally:
                 if tf is not None:
@@ -3033,12 +3200,7 @@ def rsync_ip(ip):
 
     :returns: a string ip address
     """
-    try:
-        socket.inet_pton(socket.AF_INET6, ip)
-    except socket.error:  # it's IPv4
-        return ip
-    else:
-        return '[%s]' % ip
+    return '[%s]' % ip if is_valid_ipv6(ip) else ip
 
 
 def rsync_module_interpolation(template, device):
@@ -3268,6 +3430,83 @@ class LRUCache(object):
         return LRUCacheWrapped()
 
 
+class Spliterator(object):
+    """
+    Takes an iterator yielding sliceable things (e.g. strings or lists) and
+    yields subiterators, each yielding up to the requested number of items
+    from the source.
+
+    >>> si = Spliterator(["abcde", "fg", "hijkl"])
+    >>> ''.join(si.take(4))
+    "abcd"
+    >>> ''.join(si.take(3))
+    "efg"
+    >>> ''.join(si.take(1))
+    "h"
+    >>> ''.join(si.take(3))
+    "ijk"
+    >>> ''.join(si.take(3))
+    "l"  # shorter than requested; this can happen with the last iterator
+
+    """
+    def __init__(self, source_iterable):
+        self.input_iterator = iter(source_iterable)
+        self.leftovers = None
+        self.leftovers_index = 0
+        self._iterator_in_progress = False
+
+    def take(self, n):
+        if self._iterator_in_progress:
+            raise ValueError(
+                "cannot call take() again until the first iterator is"
+                " exhausted (has raised StopIteration)")
+        self._iterator_in_progress = True
+
+        try:
+            if self.leftovers:
+                # All this string slicing is a little awkward, but it's for
+                # a good reason. Consider a length N string that someone is
+                # taking k bytes at a time.
+                #
+                # With this implementation, we create one new string of
+                # length k (copying the bytes) on each call to take(). Once
+                # the whole input has been consumed, each byte has been
+                # copied exactly once, giving O(N) bytes copied.
+                #
+                # If, instead of this, we were to set leftovers =
+                # leftovers[k:] and omit leftovers_index, then each call to
+                # take() would copy k bytes to create the desired substring,
+                # then copy all the remaining bytes to reset leftovers,
+                # resulting in an overall O(N^2) bytes copied.
+                llen = len(self.leftovers) - self.leftovers_index
+                if llen <= n:
+                    n -= llen
+                    to_yield = self.leftovers[self.leftovers_index:]
+                    self.leftovers = None
+                    self.leftovers_index = 0
+                    yield to_yield
+                else:
+                    to_yield = self.leftovers[
+                        self.leftovers_index:(self.leftovers_index + n)]
+                    self.leftovers_index += n
+                    n = 0
+                    yield to_yield
+
+            while n > 0:
+                chunk = next(self.input_iterator)
+                cl = len(chunk)
+                if cl <= n:
+                    n -= cl
+                    yield chunk
+                else:
+                    self.leftovers = chunk
+                    self.leftovers_index = n
+                    yield chunk[:n]
+                    n = 0
+        finally:
+            self._iterator_in_progress = False
+
+
 def tpool_reraise(func, *args, **kwargs):
     """
     Hack to work around Eventlet's tpool not catching and reraising Timeouts.
@@ -3429,17 +3668,14 @@ def override_bytes_from_content_type(listing_dict, logger=None):
     Takes a dict from a container listing and overrides the content_type,
     bytes fields if swift_bytes is set.
     """
-    content_type, params = parse_content_type(listing_dict['content_type'])
-    for key, value in params:
-        if key == 'swift_bytes':
-            try:
-                listing_dict['bytes'] = int(value)
-            except ValueError:
-                if logger:
-                    logger.exception("Invalid swift_bytes")
-        else:
-            content_type += ';%s=%s' % (key, value)
-    listing_dict['content_type'] = content_type
+    listing_dict['content_type'], swift_bytes = extract_swift_bytes(
+        listing_dict['content_type'])
+    if swift_bytes is not None:
+        try:
+            listing_dict['bytes'] = int(swift_bytes)
+        except ValueError:
+            if logger:
+                logger.exception(_("Invalid swift_bytes"))
 
 
 def clean_content_type(value):
@@ -3736,8 +3972,9 @@ def document_iters_to_http_response_body(ranges_iter, boundary, multipart,
         # so if that finally block fires before we read response_body_iter,
         # there's nothing there.
         def string_along(useful_iter, useless_iter_iter, logger):
-            for x in useful_iter:
-                yield x
+            with closing_if_possible(useful_iter):
+                for x in useful_iter:
+                    yield x
 
             try:
                 next(useless_iter_iter)
@@ -3745,7 +3982,7 @@ def document_iters_to_http_response_body(ranges_iter, boundary, multipart,
                 pass
             else:
                 logger.warning(
-                    "More than one part in a single-part response?")
+                    _("More than one part in a single-part response?"))
 
         return string_along(response_body_iter, ranges_iter, logger)
 
@@ -3876,3 +4113,111 @@ def get_md5_socket():
         raise IOError(ctypes.get_errno(), "Failed to accept MD5 socket")
 
     return md5_sockfd
+
+
+def modify_priority(conf, logger):
+    """
+    Modify priority by nice and ionice.
+    """
+
+    global _libc_setpriority
+    if _libc_setpriority is None:
+        _libc_setpriority = load_libc_function('setpriority',
+                                               errcheck=True)
+
+    def _setpriority(nice_priority):
+        """
+        setpriority for this pid
+
+        :param nice_priority: valid values are -19 to 20
+        """
+        try:
+            _libc_setpriority(PRIO_PROCESS, os.getpid(),
+                              int(nice_priority))
+        except (ValueError, OSError):
+            print(_("WARNING: Unable to modify scheduling priority of process."
+                    " Keeping unchanged! Check logs for more info. "))
+            logger.exception('Unable to modify nice priority')
+        else:
+            logger.debug('set nice priority to %s' % nice_priority)
+
+    nice_priority = conf.get('nice_priority')
+    if nice_priority is not None:
+        _setpriority(nice_priority)
+
+    global _posix_syscall
+    if _posix_syscall is None:
+        _posix_syscall = load_libc_function('syscall', errcheck=True)
+
+    def _ioprio_set(io_class, io_priority):
+        """
+        ioprio_set for this process
+
+        :param io_class: the I/O class component, can be
+                         IOPRIO_CLASS_RT, IOPRIO_CLASS_BE,
+                         or IOPRIO_CLASS_IDLE
+        :param io_priority: priority value in the I/O class
+        """
+        try:
+            io_class = IO_CLASS_ENUM[io_class]
+            io_priority = int(io_priority)
+            _posix_syscall(NR_ioprio_set(),
+                           IOPRIO_WHO_PROCESS,
+                           os.getpid(),
+                           IOPRIO_PRIO_VALUE(io_class, io_priority))
+        except (KeyError, ValueError, OSError):
+            print(_("WARNING: Unable to modify I/O scheduling class "
+                    "and priority of process. Keeping unchanged! "
+                    "Check logs for more info."))
+            logger.exception("Unable to modify ionice priority")
+        else:
+            logger.debug('set ionice class %s priority %s',
+                         io_class, io_priority)
+
+    io_class = conf.get("ionice_class")
+    if io_class is None:
+        return
+    io_priority = conf.get("ionice_priority", 0)
+    _ioprio_set(io_class, io_priority)
+
+
+def o_tmpfile_supported():
+    """
+    Returns True if O_TMPFILE flag is supported.
+
+    O_TMPFILE was introduced in Linux 3.11 but it also requires support from
+    underlying filesystem being used. Some common filesystems and linux
+    versions in which those filesystems added support for O_TMPFILE:
+    xfs (3.15)
+    ext4 (3.11)
+    btrfs (3.16)
+    """
+    return all([linkat.available,
+                platform.system() == 'Linux',
+                LooseVersion(platform.release()) >= LooseVersion('3.16')])
+
+
+def safe_json_loads(value):
+    if value:
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+MD5_BLOCK_READ_BYTES = 4096
+
+
+def md5_hash_for_file(fname):
+    """
+    Get the MD5 checksum of a file.
+
+    :param fname: path to file
+    :returns: MD5 checksum, hex encoded
+    """
+    with open(fname, 'rb') as f:
+        md5sum = md5()
+        for block in iter(lambda: f.read(MD5_BLOCK_READ_BYTES), ''):
+            md5sum.update(block)
+    return md5sum.hexdigest()

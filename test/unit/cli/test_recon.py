@@ -22,8 +22,9 @@ import time
 import unittest
 import shutil
 import sys
+import six
 
-from eventlet.green import urllib2, socket
+from eventlet.green import socket
 from six import StringIO
 from six.moves import urllib
 
@@ -33,6 +34,11 @@ from swift.common.ring import builder
 from swift.common.ring import utils as ring_utils
 from swift.common.storage_policy import StoragePolicy, POLICIES
 from test.unit import patch_policies
+
+if six.PY3:
+    from eventlet.green.urllib import request as urllib2
+else:
+    from eventlet.green import urllib2
 
 
 class TestHelpers(unittest.TestCase):
@@ -74,7 +80,7 @@ class TestScout(unittest.TestCase):
         mock_urlopen.side_effect = urllib2.URLError("")
         url, content, status, ts_start, ts_end = self.scout_instance.scout(
             ("127.0.0.1", "8080"))
-        self.assertTrue(isinstance(content, urllib2.URLError))
+        self.assertIsInstance(content, urllib2.URLError)
         self.assertEqual(url, self.url)
         self.assertEqual(status, -1)
 
@@ -85,7 +91,7 @@ class TestScout(unittest.TestCase):
         url, content, status, ts_start, ts_end = self.scout_instance.scout(
             ("127.0.0.1", "8080"))
         self.assertEqual(url, self.url)
-        self.assertTrue(isinstance(content, urllib2.HTTPError))
+        self.assertIsInstance(content, urllib2.HTTPError)
         self.assertEqual(status, 404)
 
     @mock.patch('eventlet.green.urllib2.urlopen')
@@ -93,7 +99,7 @@ class TestScout(unittest.TestCase):
         mock_urlopen.side_effect = socket.timeout("timeout")
         url, content, status, ts_start, ts_end = self.scout_instance.scout(
             ("127.0.0.1", "8080"))
-        self.assertTrue(isinstance(content, socket.timeout))
+        self.assertIsInstance(content, socket.timeout)
         self.assertEqual(url, self.url)
         self.assertEqual(status, -1)
 
@@ -114,7 +120,7 @@ class TestScout(unittest.TestCase):
         mock_urlopen.side_effect = urllib2.URLError("")
         url, content, status = self.scout_instance.scout_server_type(
             ("127.0.0.1", "8080"))
-        self.assertTrue(isinstance(content, urllib2.URLError))
+        self.assertIsInstance(content, urllib2.URLError)
         self.assertEqual(url, self.server_type_url)
         self.assertEqual(status, -1)
 
@@ -125,7 +131,7 @@ class TestScout(unittest.TestCase):
         url, content, status = self.scout_instance.scout_server_type(
             ("127.0.0.1", "8080"))
         self.assertEqual(url, self.server_type_url)
-        self.assertTrue(isinstance(content, urllib2.HTTPError))
+        self.assertIsInstance(content, urllib2.HTTPError)
         self.assertEqual(status, 404)
 
     @mock.patch('eventlet.green.urllib2.urlopen')
@@ -133,7 +139,7 @@ class TestScout(unittest.TestCase):
         mock_urlopen.side_effect = socket.timeout("timeout")
         url, content, status = self.scout_instance.scout_server_type(
             ("127.0.0.1", "8080"))
-        self.assertTrue(isinstance(content, socket.timeout))
+        self.assertIsInstance(content, socket.timeout)
         self.assertEqual(url, self.server_type_url)
         self.assertEqual(status, -1)
 
@@ -257,6 +263,26 @@ class TestRecon(unittest.TestCase):
         self.assertEqual(set([('127.0.0.1', 10001),
                               ('127.0.0.2', 10004)]), ips)
 
+    def test_get_error_ringnames(self):
+        # create invalid ring name files
+        invalid_ring_file_names = ('object.sring.gz',
+                                   'object-1.sring.gz',
+                                   'broken')
+        for invalid_ring in invalid_ring_file_names:
+            ring_path = os.path.join(self.swift_dir, invalid_ring)
+            with open(ring_path, 'w'):
+                pass
+
+        hosts = [("127.0.0.1", "8080")]
+        self.recon_instance.verbose = True
+        self.recon_instance.server_type = 'object'
+        stdout = StringIO()
+        with mock.patch('sys.stdout', new=stdout), \
+                mock.patch('swift.common.utils.md5'):
+            self.recon_instance.get_ringmd5(hosts, self.swift_dir)
+        output = stdout.getvalue()
+        self.assertNotIn('On disk ', output)
+
     def test_get_ringmd5(self):
         for server_type in ('account', 'container', 'object', 'object-1'):
             ring_name = '%s.ring.gz' % server_type
@@ -264,6 +290,7 @@ class TestRecon(unittest.TestCase):
             open(ring_file, 'w')
 
         empty_file_hash = 'd41d8cd98f00b204e9800998ecf8427e'
+        bad_file_hash = '00000000000000000000000000000000'
         hosts = [("127.0.0.1", "8080")]
         with mock.patch('swift.cli.recon.Scout') as mock_scout:
             scout_instance = mock.MagicMock()
@@ -277,10 +304,62 @@ class TestRecon(unittest.TestCase):
             status = 200
             scout_instance.scout.return_value = (url, response, status, 0, 0)
             mock_scout.return_value = scout_instance
-            stdout = StringIO()
             mock_hash = mock.MagicMock()
+
+            # Check correct account, container and object ring hashes
+            for server_type in ('account', 'container', 'object'):
+                self.recon_instance.server_type = server_type
+                stdout = StringIO()
+                with mock.patch('sys.stdout', new=stdout), \
+                        mock.patch('swift.common.utils.md5', new=mock_hash):
+                    mock_hash.return_value.hexdigest.return_value = \
+                        empty_file_hash
+                    self.recon_instance.get_ringmd5(hosts, self.swift_dir)
+                output = stdout.getvalue()
+                expected = '1/1 hosts matched'
+                found = False
+                for line in output.splitlines():
+                    if '!!' in line:
+                        self.fail('Unexpected Error in output: %r' % line)
+                    if expected in line:
+                        found = True
+                if not found:
+                    self.fail('Did not find expected substring %r '
+                              'in output:\n%s' % (expected, output))
+
+            # Check bad container ring hash
+            self.recon_instance.server_type = 'container'
+            response = {
+                '/etc/swift/account.ring.gz': empty_file_hash,
+                '/etc/swift/container.ring.gz': bad_file_hash,
+                '/etc/swift/object.ring.gz': empty_file_hash,
+                '/etc/swift/object-1.ring.gz': empty_file_hash,
+            }
+            scout_instance.scout.return_value = (url, response, status, 0, 0)
+            mock_scout.return_value = scout_instance
+            stdout = StringIO()
             with mock.patch('sys.stdout', new=stdout), \
-                    mock.patch('swift.cli.recon.md5', new=mock_hash):
+                    mock.patch('swift.common.utils.md5', new=mock_hash):
+                mock_hash.return_value.hexdigest.return_value = \
+                    empty_file_hash
+                self.recon_instance.get_ringmd5(hosts, self.swift_dir)
+            output = stdout.getvalue()
+            expected = '0/1 hosts matched'
+            found = False
+            for line in output.splitlines():
+                if '!!' in line:
+                    self.assertIn('doesn\'t match on disk md5sum', line)
+                if expected in line:
+                    found = True
+            if not found:
+                self.fail('Did not find expected substring %r '
+                          'in output:\n%s' % (expected, output))
+
+            # Check object ring, container mismatch should be ignored
+            self.recon_instance.server_type = 'object'
+            stdout = StringIO()
+            with mock.patch('sys.stdout', new=stdout), \
+                    mock.patch('swift.common.utils.md5', new=mock_hash):
                 mock_hash.return_value.hexdigest.return_value = \
                     empty_file_hash
                 self.recon_instance.get_ringmd5(hosts, self.swift_dir)
@@ -290,11 +369,13 @@ class TestRecon(unittest.TestCase):
                 if '!!' in line:
                     self.fail('Unexpected Error in output: %r' % line)
                 if expected in line:
-                    break
-            else:
+                    found = True
+            if not found:
                 self.fail('Did not find expected substring %r '
                           'in output:\n%s' % (expected, output))
 
+        # Cleanup
+        self.recon_instance.server_type = 'object'
         for ring in ('account', 'container', 'object', 'object-1'):
             os.remove(os.path.join(self.swift_dir, "%s.ring.gz" % ring))
 
@@ -596,8 +677,8 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check(hosts)
 
         output = stdout.getvalue()
-        self.assertTrue(res_container in output.splitlines())
-        self.assertTrue(res_account in output.splitlines())
+        self.assertIn(res_container, output.splitlines())
+        self.assertIn(res_account, output.splitlines())
         stdout.truncate(0)
 
         # Test ok for object server type - default
@@ -607,7 +688,7 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check([hosts[0]])
 
         output = stdout.getvalue()
-        self.assertTrue(valid in output.splitlines())
+        self.assertIn(valid, output.splitlines())
         stdout.truncate(0)
 
         # Test for account server type
@@ -618,8 +699,8 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check(hosts)
 
         output = stdout.getvalue()
-        self.assertTrue(res_container in output.splitlines())
-        self.assertTrue(res_object in output.splitlines())
+        self.assertIn(res_container, output.splitlines())
+        self.assertIn(res_object, output.splitlines())
         stdout.truncate(0)
 
         # Test ok for account server type
@@ -630,7 +711,7 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check([hosts[2]])
 
         output = stdout.getvalue()
-        self.assertTrue(valid in output.splitlines())
+        self.assertIn(valid, output.splitlines())
         stdout.truncate(0)
 
         # Test for container server type
@@ -641,8 +722,8 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check(hosts)
 
         output = stdout.getvalue()
-        self.assertTrue(res_account in output.splitlines())
-        self.assertTrue(res_object in output.splitlines())
+        self.assertIn(res_account, output.splitlines())
+        self.assertIn(res_object, output.splitlines())
         stdout.truncate(0)
 
         # Test ok for container server type
@@ -653,7 +734,7 @@ class TestReconCommands(unittest.TestCase):
             self.recon.server_type_check([hosts[1]])
 
         output = stdout.getvalue()
-        self.assertTrue(valid in output.splitlines())
+        self.assertIn(valid, output.splitlines())
 
     def test_get_swiftconfmd5(self):
         hosts = set([('10.1.1.1', 10000),
@@ -668,11 +749,12 @@ class TestReconCommands(unittest.TestCase):
 
         printed = []
         with self.mock_responses(responses):
-            with mock.patch.object(self.recon, '_md5_file', lambda _: cksum):
+            with mock.patch('swift.cli.recon.md5_hash_for_file',
+                            lambda _: cksum):
                 self.recon.get_swiftconfmd5(hosts, printfn=printed.append)
 
         output = '\n'.join(printed) + '\n'
-        self.assertTrue("2/2 hosts matched" in output)
+        self.assertIn("2/2 hosts matched", output)
 
     def test_get_swiftconfmd5_mismatch(self):
         hosts = set([('10.1.1.1', 10000),
@@ -687,13 +769,14 @@ class TestReconCommands(unittest.TestCase):
 
         printed = []
         with self.mock_responses(responses):
-            with mock.patch.object(self.recon, '_md5_file', lambda _: cksum):
+            with mock.patch('swift.cli.recon.md5_hash_for_file',
+                            lambda _: cksum):
                 self.recon.get_swiftconfmd5(hosts, printfn=printed.append)
 
         output = '\n'.join(printed) + '\n'
-        self.assertTrue("1/2 hosts matched" in output)
-        self.assertTrue("http://10.2.2.2:10000/recon/swiftconfmd5 (bogus) "
-                        "doesn't match on disk md5sum" in output)
+        self.assertIn("1/2 hosts matched", output)
+        self.assertIn("http://10.2.2.2:10000/recon/swiftconfmd5 (bogus) "
+                      "doesn't match on disk md5sum", output)
 
     def test_object_auditor_check(self):
         # Recon middleware response from an object server
@@ -738,7 +821,7 @@ class TestReconCommands(unittest.TestCase):
             computed = response.get(name)
             self.assertTrue(computed)
             for key in keys:
-                self.assertTrue(key in computed)
+                self.assertIn(key, computed)
 
     def test_disk_usage(self):
         def dummy_request(*args, **kwargs):

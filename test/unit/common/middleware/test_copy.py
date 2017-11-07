@@ -150,13 +150,15 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual(len(self.authorized), 1)
         self.assertRequestEqual(req, self.authorized[0])
 
-    def test_object_delete_pass_through(self):
-        self.app.register('DELETE', '/v1/a/c/o', swob.HTTPOk, {})
-        req = Request.blank('/v1/a/c/o', method='DELETE')
-        status, headers, body = self.call_ssc(req)
-        self.assertEqual(status, '200 OK')
-        self.assertEqual(len(self.authorized), 1)
-        self.assertRequestEqual(req, self.authorized[0])
+    def test_object_pass_through_methods(self):
+        for method in ['DELETE', 'GET', 'HEAD', 'REPLICATE']:
+            self.app.register(method, '/v1/a/c/o', swob.HTTPOk, {})
+            req = Request.blank('/v1/a/c/o', method=method)
+            status, headers, body = self.call_ssc(req)
+            self.assertEqual(status, '200 OK')
+            self.assertEqual(len(self.authorized), 1)
+            self.assertRequestEqual(req, self.authorized[0])
+            self.assertNotIn('swift.orig_req_method', req.environ)
 
     def test_POST_as_COPY_simple(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPOk, {}, 'passed')
@@ -166,6 +168,8 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual(status, '202 Accepted')
         self.assertEqual(len(self.authorized), 1)
         self.assertRequestEqual(req, self.authorized[0])
+        # For basic test cases, assert orig_req_method behavior
+        self.assertEqual(req.environ['swift.orig_req_method'], 'POST')
 
     def test_POST_as_COPY_201_return_202(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPOk, {}, 'passed')
@@ -210,6 +214,38 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual(len(self.authorized), 1)
         self.assertRequestEqual(req, self.authorized[0])
 
+    def test_POST_as_COPY_dynamic_large_object_manifest(self):
+        self.app.register('GET', '/v1/a/c/o', swob.HTTPOk,
+                          {'X-Object-Manifest': 'orig_manifest'}, 'passed')
+        self.app.register('PUT', '/v1/a/c/o', swob.HTTPCreated, {})
+        req = Request.blank('/v1/a/c/o', method='POST',
+                            headers={'X-Object-Manifest': 'new_manifest'})
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '202 Accepted')
+
+        calls = self.app.calls_with_headers
+        method, path, req_headers = calls[1]
+        self.assertEqual('PUT', method)
+        self.assertEqual('new_manifest', req_headers['x-object-manifest'])
+        self.assertEqual(len(self.authorized), 1)
+        self.assertRequestEqual(req, self.authorized[0])
+
+    def test_POST_as_COPY_dynamic_large_object_no_manifest(self):
+        self.app.register('GET', '/v1/a/c/o', swob.HTTPOk,
+                          {'X-Object-Manifest': 'orig_manifest'}, 'passed')
+        self.app.register('PUT', '/v1/a/c/o', swob.HTTPCreated, {})
+        req = Request.blank('/v1/a/c/o', method='POST',
+                            headers={})
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '202 Accepted')
+
+        calls = self.app.calls_with_headers
+        method, path, req_headers = calls[1]
+        self.assertEqual('PUT', method)
+        self.assertNotIn('X-Object-Manifest', req_headers)
+        self.assertEqual(len(self.authorized), 1)
+        self.assertRequestEqual(req, self.authorized[0])
+
     def test_basic_put_with_x_copy_from(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPOk, {}, 'passed')
         self.app.register('PUT', '/v1/a/c/o2', swob.HTTPCreated, {})
@@ -224,6 +260,10 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual('/v1/a/c/o', self.authorized[0].path)
         self.assertEqual('PUT', self.authorized[1].method)
         self.assertEqual('/v1/a/c/o2', self.authorized[1].path)
+        self.assertEqual(self.app.swift_sources[0], 'SSC')
+        self.assertEqual(self.app.swift_sources[1], 'SSC')
+        # For basic test cases, assert orig_req_method behavior
+        self.assertNotIn('swift.orig_req_method', req.environ)
 
     def test_static_large_object_manifest(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPOk,
@@ -489,24 +529,16 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
                             headers={'Content-Length': '0',
                                      'X-Copy-From': '/c'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_copy_with_no_object_in_x_copy_from_and_account(self):
         req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
                             headers={'Content-Length': '0',
                                      'X-Copy-From': '/c',
                                      'X-Copy-From-Account': 'a'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_copy_with_bad_x_copy_from_account(self):
         req = Request.blank('/v1/a/c/o',
@@ -514,12 +546,8 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
                             headers={'Content-Length': '0',
                                      'X-Copy-From': '/c/o',
                                      'X-Copy-From-Account': '/i/am/bad'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_copy_server_error_reading_source(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPServiceUnavailable, {})
@@ -641,6 +669,8 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
             ('PUT', '/v1/a/c/o-copy')])
         self.assertIn('etag', self.app.headers[1])
         self.assertEqual(self.app.headers[1]['etag'], 'is sent')
+        # For basic test cases, assert orig_req_method behavior
+        self.assertEqual(req.environ['swift.orig_req_method'], 'COPY')
 
     def test_basic_DLO(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPOk, {
@@ -960,36 +990,27 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         req = Request.blank('/v1/a/c/o',
                             environ={'REQUEST_METHOD': 'COPY'},
                             headers={'Destination': 'c_o'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_COPY_account_no_object_in_destination(self):
         req = Request.blank('/v1/a/c/o',
                             environ={'REQUEST_METHOD': 'COPY'},
                             headers={'Destination': 'c_o',
                                      'Destination-Account': 'a1'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_COPY_account_bad_destination_account(self):
         req = Request.blank('/v1/a/c/o',
                             environ={'REQUEST_METHOD': 'COPY'},
                             headers={'Destination': '/c/o',
                                      'Destination-Account': '/i/am/bad'})
-        try:
-            status, headers, body = self.call_ssc(req)
-        except HTTPException as resp:
-            self.assertEqual("412 Precondition Failed", str(resp))
-        else:
-            self.fail("Expecting HTTPException.")
+        status, headers, body = self.call_ssc(req)
+
+        self.assertEqual(status, '412 Precondition Failed')
 
     def test_COPY_server_error_reading_source(self):
         self.app.register('GET', '/v1/a/c/o', swob.HTTPServiceUnavailable, {})
@@ -1178,6 +1199,8 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual(len(self.authorized), 1)
         self.assertEqual('OPTIONS', self.authorized[0].method)
         self.assertEqual('/v1/a/c/o', self.authorized[0].path)
+        # For basic test cases, assert orig_req_method behavior
+        self.assertNotIn('swift.orig_req_method', req.environ)
 
     def test_COPY_in_OPTIONS_response_CORS(self):
         self.app.register('OPTIONS', '/v1/a/c/o', swob.HTTPOk,
@@ -1198,6 +1221,242 @@ class TestServerSideCopyMiddleware(unittest.TestCase):
         self.assertEqual('OPTIONS', self.authorized[0].method)
         self.assertEqual('/v1/a/c/o', self.authorized[0].path)
 
+    def _test_COPY_source_headers(self, extra_put_headers):
+        # helper method to perform a COPY with some metadata headers that
+        # should always be sent to the destination
+        put_headers = {'Destination': '/c1/o',
+                       'X-Object-Meta-Test2': 'added',
+                       'X-Object-Sysmeta-Test2': 'added',
+                       'X-Object-Transient-Sysmeta-Test2': 'added'}
+        put_headers.update(extra_put_headers)
+        get_resp_headers = {
+            'X-Timestamp': '1234567890.12345',
+            'X-Backend-Timestamp': '1234567890.12345',
+            'Content-Type': 'text/original',
+            'Content-Encoding': 'gzip',
+            'Content-Disposition': 'attachment; filename=myfile',
+            'X-Object-Meta-Test': 'original',
+            'X-Object-Sysmeta-Test': 'original',
+            'X-Object-Transient-Sysmeta-Test': 'original',
+            'X-Foo': 'Bar'}
+        self.app.register(
+            'GET', '/v1/a/c/o', swob.HTTPOk, headers=get_resp_headers)
+        self.app.register('PUT', '/v1/a/c1/o', swob.HTTPCreated, {})
+        req = Request.blank('/v1/a/c/o', method='COPY', headers=put_headers)
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '201 Created')
+        calls = self.app.calls_with_headers
+        self.assertEqual(2, len(calls))
+        method, path, req_headers = calls[1]
+        self.assertEqual('PUT', method)
+        # these headers should always be applied to the destination
+        self.assertEqual('added', req_headers.get('X-Object-Meta-Test2'))
+        self.assertEqual('added', req_headers.get('X-Object-Sysmeta-Test2'))
+        self.assertEqual('added',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test2'))
+        return req_headers
+
+    def test_COPY_source_headers_no_updates(self):
+        # copy should preserve existing metadata if not updated
+        req_headers = self._test_COPY_source_headers({})
+        self.assertEqual('text/original', req_headers.get('Content-Type'))
+        self.assertEqual('gzip', req_headers.get('Content-Encoding'))
+        self.assertEqual('attachment; filename=myfile',
+                         req_headers.get('Content-Disposition'))
+        self.assertEqual('original', req_headers.get('X-Object-Meta-Test'))
+        self.assertEqual('original', req_headers.get('X-Object-Sysmeta-Test'))
+        self.assertEqual('original',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test'))
+        self.assertEqual('Bar', req_headers.get('X-Foo'))
+        self.assertNotIn('X-Timestamp', req_headers)
+        self.assertNotIn('X-Backend-Timestamp', req_headers)
+
+    def test_COPY_source_headers_with_updates(self):
+        # copy should apply any updated values to existing metadata
+        put_headers = {
+            'Content-Type': 'text/not_original',
+            'Content-Encoding': 'not_gzip',
+            'Content-Disposition': 'attachment; filename=notmyfile',
+            'X-Object-Meta-Test': 'not_original',
+            'X-Object-Sysmeta-Test': 'not_original',
+            'X-Object-Transient-Sysmeta-Test': 'not_original',
+            'X-Foo': 'Not Bar'}
+        req_headers = self._test_COPY_source_headers(put_headers)
+        self.assertEqual('text/not_original', req_headers.get('Content-Type'))
+        self.assertEqual('not_gzip', req_headers.get('Content-Encoding'))
+        self.assertEqual('attachment; filename=notmyfile',
+                         req_headers.get('Content-Disposition'))
+        self.assertEqual('not_original', req_headers.get('X-Object-Meta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Sysmeta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test'))
+        self.assertEqual('Not Bar', req_headers.get('X-Foo'))
+        self.assertNotIn('X-Timestamp', req_headers)
+        self.assertNotIn('X-Backend-Timestamp', req_headers)
+
+    def test_COPY_x_fresh_metadata_no_updates(self):
+        # existing user metadata should not be copied, sysmeta is copied
+        put_headers = {
+            'X-Fresh-Metadata': 'true',
+            'X-Extra': 'Fresh'}
+        req_headers = self._test_COPY_source_headers(put_headers)
+        self.assertEqual('text/original', req_headers.get('Content-Type'))
+        self.assertEqual('Fresh', req_headers.get('X-Extra'))
+        self.assertEqual('original',
+                         req_headers.get('X-Object-Sysmeta-Test'))
+        self.assertIn('X-Fresh-Metadata', req_headers)
+        self.assertNotIn('X-Object-Meta-Test', req_headers)
+        self.assertNotIn('X-Object-Transient-Sysmeta-Test', req_headers)
+        self.assertNotIn('X-Timestamp', req_headers)
+        self.assertNotIn('X-Backend-Timestamp', req_headers)
+        self.assertNotIn('Content-Encoding', req_headers)
+        self.assertNotIn('Content-Disposition', req_headers)
+        self.assertNotIn('X-Foo', req_headers)
+
+    def test_COPY_x_fresh_metadata_with_updates(self):
+        # existing user metadata should not be copied, new metadata replaces it
+        put_headers = {
+            'X-Fresh-Metadata': 'true',
+            'Content-Type': 'text/not_original',
+            'Content-Encoding': 'not_gzip',
+            'Content-Disposition': 'attachment; filename=notmyfile',
+            'X-Object-Meta-Test': 'not_original',
+            'X-Object-Sysmeta-Test': 'not_original',
+            'X-Object-Transient-Sysmeta-Test': 'not_original',
+            'X-Foo': 'Not Bar',
+            'X-Extra': 'Fresh'}
+        req_headers = self._test_COPY_source_headers(put_headers)
+        self.assertEqual('Fresh', req_headers.get('X-Extra'))
+        self.assertEqual('text/not_original', req_headers.get('Content-Type'))
+        self.assertEqual('not_gzip', req_headers.get('Content-Encoding'))
+        self.assertEqual('attachment; filename=notmyfile',
+                         req_headers.get('Content-Disposition'))
+        self.assertEqual('not_original', req_headers.get('X-Object-Meta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Sysmeta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test'))
+        self.assertEqual('Not Bar', req_headers.get('X-Foo'))
+
+    def _test_POST_source_headers(self, extra_post_headers):
+        # helper method to perform a POST with metadata headers that should
+        # always be sent to the destination
+        post_headers = {'X-Object-Meta-Test2': 'added',
+                        'X-Object-Sysmeta-Test2': 'added',
+                        'X-Object-Transient-Sysmeta-Test2': 'added'}
+        post_headers.update(extra_post_headers)
+        get_resp_headers = {
+            'X-Timestamp': '1234567890.12345',
+            'X-Backend-Timestamp': '1234567890.12345',
+            'Content-Type': 'text/original',
+            'Content-Encoding': 'gzip',
+            'Content-Disposition': 'attachment; filename=myfile',
+            'X-Object-Meta-Test': 'original',
+            'X-Object-Sysmeta-Test': 'original',
+            'X-Object-Transient-Sysmeta-Test': 'original',
+            'X-Foo': 'Bar'}
+        self.app.register(
+            'GET', '/v1/a/c/o', swob.HTTPOk, headers=get_resp_headers)
+        self.app.register('PUT', '/v1/a/c/o', swob.HTTPCreated, {})
+        req = Request.blank('/v1/a/c/o', method='POST', headers=post_headers)
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual(status, '202 Accepted')
+        calls = self.app.calls_with_headers
+        self.assertEqual(2, len(calls))
+        method, path, req_headers = calls[1]
+        self.assertEqual('PUT', method)
+        # these headers should always be applied to the destination
+        self.assertEqual('added', req_headers.get('X-Object-Meta-Test2'))
+        self.assertEqual('added',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test2'))
+        # POSTed sysmeta should never be applied to the destination
+        self.assertNotIn('X-Object-Sysmeta-Test2', req_headers)
+        # existing sysmeta should always be preserved
+        self.assertEqual('original',
+                         req_headers.get('X-Object-Sysmeta-Test'))
+        return req_headers
+
+    def test_POST_no_updates(self):
+        post_headers = {}
+        req_headers = self._test_POST_source_headers(post_headers)
+        self.assertEqual('text/original', req_headers.get('Content-Type'))
+        self.assertNotIn('X-Object-Meta-Test', req_headers)
+        self.assertNotIn('X-Object-Transient-Sysmeta-Test', req_headers)
+        self.assertNotIn('X-Timestamp', req_headers)
+        self.assertNotIn('X-Backend-Timestamp', req_headers)
+        self.assertNotIn('Content-Encoding', req_headers)
+        self.assertNotIn('Content-Disposition', req_headers)
+        self.assertNotIn('X-Foo', req_headers)
+
+    def test_POST_with_updates(self):
+        post_headers = {
+            'Content-Type': 'text/not_original',
+            'Content-Encoding': 'not_gzip',
+            'Content-Disposition': 'attachment; filename=notmyfile',
+            'X-Object-Meta-Test': 'not_original',
+            'X-Object-Sysmeta-Test': 'not_original',
+            'X-Object-Transient-Sysmeta-Test': 'not_original',
+            'X-Foo': 'Not Bar',
+        }
+        req_headers = self._test_POST_source_headers(post_headers)
+        self.assertEqual('text/not_original', req_headers.get('Content-Type'))
+        self.assertEqual('not_gzip', req_headers.get('Content-Encoding'))
+        self.assertEqual('attachment; filename=notmyfile',
+                         req_headers.get('Content-Disposition'))
+        self.assertEqual('not_original', req_headers.get('X-Object-Meta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test'))
+        self.assertEqual('Not Bar', req_headers.get('X-Foo'))
+
+    def test_POST_x_fresh_metadata_with_updates(self):
+        # post-as-copy trumps x-fresh-metadata i.e. existing user metadata
+        # should not be copied, sysmeta is copied *and not updated with new*
+        post_headers = {
+            'X-Fresh-Metadata': 'true',
+            'Content-Type': 'text/not_original',
+            'Content-Encoding': 'not_gzip',
+            'Content-Disposition': 'attachment; filename=notmyfile',
+            'X-Object-Meta-Test': 'not_original',
+            'X-Object-Sysmeta-Test': 'not_original',
+            'X-Object-Transient-Sysmeta-Test': 'not_original',
+            'X-Foo': 'Not Bar',
+        }
+        req_headers = self._test_POST_source_headers(post_headers)
+        self.assertEqual('text/not_original', req_headers.get('Content-Type'))
+        self.assertEqual('not_gzip', req_headers.get('Content-Encoding'))
+        self.assertEqual('attachment; filename=notmyfile',
+                         req_headers.get('Content-Disposition'))
+        self.assertEqual('not_original', req_headers.get('X-Object-Meta-Test'))
+        self.assertEqual('not_original',
+                         req_headers.get('X-Object-Transient-Sysmeta-Test'))
+        self.assertEqual('Not Bar', req_headers.get('X-Foo'))
+        self.assertIn('X-Fresh-Metadata', req_headers)
+
+    def test_COPY_with_single_range(self):
+        # verify that source etag is not copied when copying a range
+        self.app.register('GET', '/v1/a/c/o', swob.HTTPOk,
+                          {'etag': 'bogus etag'}, "abcdefghijklmnop")
+        self.app.register('PUT', '/v1/a/c1/o', swob.HTTPCreated, {})
+        req = swob.Request.blank(
+            '/v1/a/c/o', method='COPY',
+            headers={'Destination': 'c1/o',
+                     'Range': 'bytes=5-10'})
+
+        status, headers, body = self.call_ssc(req)
+
+        self.assertEqual(status, '201 Created')
+        calls = self.app.calls_with_headers
+        self.assertEqual(2, len(calls))
+        method, path, req_headers = calls[1]
+        self.assertEqual('PUT', method)
+        self.assertEqual('/v1/a/c1/o', path)
+        self.assertNotIn('etag', (h.lower() for h in req_headers))
+        self.assertEqual('6', req_headers['content-length'])
+        req = swob.Request.blank('/v1/a/c1/o', method='GET')
+        status, headers, body = self.call_ssc(req)
+        self.assertEqual('fghijk', body)
+
 
 class TestServerSideCopyConfiguration(unittest.TestCase):
 
@@ -1206,6 +1465,10 @@ class TestServerSideCopyConfiguration(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
+
+    def test_post_as_copy_defaults_to_false(self):
+        ssc = copy.filter_factory({})("no app here")
+        self.assertEqual(ssc.object_post_as_copy, False)
 
     def test_reading_proxy_conf_when_no_middleware_conf_present(self):
         proxy_conf = dedent("""
@@ -1254,12 +1517,49 @@ class TestServerSideCopyConfiguration(unittest.TestCase):
         conffile.write(proxy_conf)
         conffile.flush()
 
-        ssc = copy.filter_factory({
-            'object_post_as_copy': 'no',
-            '__file__': conffile.name
-        })("no app here")
+        with mock.patch('swift.common.middleware.copy.get_logger',
+                        return_value=debug_logger('copy')):
+            ssc = copy.filter_factory({
+                'object_post_as_copy': 'no',
+                '__file__': conffile.name
+            })("no app here")
 
         self.assertEqual(ssc.object_post_as_copy, False)
+        self.assertFalse(ssc.logger.get_lines_for_level('warning'))
+
+    def _test_post_as_copy_emits_warning(self, conf):
+        with mock.patch('swift.common.middleware.copy.get_logger',
+                        return_value=debug_logger('copy')):
+            ssc = copy.filter_factory(conf)("no app here")
+
+        self.assertEqual(ssc.object_post_as_copy, True)
+        log_lines = ssc.logger.get_lines_for_level('warning')
+        self.assertEqual(1, len(log_lines))
+        self.assertIn('object_post_as_copy=true is deprecated', log_lines[0])
+
+    def test_post_as_copy_emits_warning(self):
+        self._test_post_as_copy_emits_warning({'object_post_as_copy': 'yes'})
+
+        proxy_conf = dedent("""
+        [DEFAULT]
+        bind_ip = 10.4.5.6
+
+        [pipeline:main]
+        pipeline = catch_errors copy ye-olde-proxy-server
+
+        [filter:copy]
+        use = egg:swift#copy
+
+        [app:ye-olde-proxy-server]
+        use = egg:swift#proxy
+        object_post_as_copy = yes
+        """)
+
+        conffile = tempfile.NamedTemporaryFile()
+        conffile.write(proxy_conf)
+        conffile.flush()
+
+        self._test_post_as_copy_emits_warning({'__file__': conffile.name})
 
 
 @patch_policies(with_ec_default=True)
@@ -1286,7 +1586,7 @@ class TestServerSideCopyMiddlewareWithEC(unittest.TestCase):
         self.policy = POLICIES.default
         self.app.container_info = dict(self.container_info)
 
-    def test_COPY_with_ranges(self):
+    def test_COPY_with_single_range(self):
         req = swob.Request.blank(
             '/v1/a/c/o', method='COPY',
             headers={'Destination': 'c1/o',
@@ -1316,10 +1616,24 @@ class TestServerSideCopyMiddlewareWithEC(unittest.TestCase):
             'X-Obj-Metadata-Footer': 'yes',
             'X-Obj-Multiphase-Commit': 'yes'
         }
+
+        put_hdrs = []
+
+        def capture_conn(host, port, dev, part, method, path, *args, **kwargs):
+            if method == 'PUT':
+                put_hdrs.append(args[0])
+
         with set_http_connect(*status_codes, body_iter=body_iter,
-                              headers=headers, expect_headers=expect_headers):
+                              headers=headers, expect_headers=expect_headers,
+                              give_connect=capture_conn):
             resp = req.get_response(self.ssc)
+
         self.assertEqual(resp.status_int, 201)
+        expected_puts = POLICIES.default.ec_ndata + POLICIES.default.ec_nparity
+        self.assertEqual(expected_puts, len(put_hdrs))
+        for hdrs in put_hdrs:
+            # etag should not be copied from source
+            self.assertNotIn('etag', (h.lower() for h in hdrs))
 
     def test_COPY_with_invalid_ranges(self):
         # real body size is segment_size - 10 (just 1 segment)

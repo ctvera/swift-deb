@@ -93,6 +93,8 @@ Storage Backends (DiskFile API implementations)
 
 Developer Tools
 ---------------
+* `SAIO bash scripts <https://github.com/ntata/swift-setup-scripts.git>`_ -
+  Well commented simple bash scripts for Swift all in one setup.
 * `vagrant-swift-all-in-one
   <https://github.com/swiftstack/vagrant-swift-all-in-one>`_ - Quickly setup a
   standard development environment using Vagrant and Chef cookbooks in an
@@ -114,4 +116,5 @@ Other
 * `Swift Browser <https://github.com/zerovm/swift-browser>`_ - JavaScript interface for Swift
 * `swift-ui <https://github.com/fanatic/swift-ui>`_ - OpenStack Swift web browser
 * `Swift Durability Calculator <https://github.com/enovance/swift-durability-calculator>`_ - Data Durability Calculation Tool for Swift
-* `swiftbackmeup <https://github.com/redhat-cip/swiftbackmeup>` -  Utility that allows one to create backups and upload them to OpenStack Swift
+* `swiftbackmeup <https://github.com/redhat-cip/swiftbackmeup>`_ -  Utility that allows one to create backups and upload them to OpenStack Swift
+* `Multi Swift <https://github.com/ntata/multi-swift-POC>`_ - Bash scripts to spin up multiple Swift clusters sharing the same hardware

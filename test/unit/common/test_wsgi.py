@@ -17,19 +17,21 @@
 
 import errno
 import logging
-import mimetools
 import socket
 import unittest
 import os
 from textwrap import dedent
 from collections import defaultdict
 
-from eventlet import listen
+import six
 from six import BytesIO
 from six import StringIO
 from six.moves.urllib.parse import quote
+if six.PY2:
+    import mimetools
 
 import mock
+import nose
 
 import swift.common.middleware.catch_errors
 import swift.common.middleware.gatekeeper
@@ -42,6 +44,7 @@ from swift.common.swob import Request
 from swift.common import wsgi, utils
 from swift.common.storage_policy import POLICIES
 
+from test import listen_zero
 from test.unit import (
     temptree, with_tempdir, write_fake_ring, patch_policies, FakeLogger)
 
@@ -65,12 +68,17 @@ class TestWSGI(unittest.TestCase):
 
     def setUp(self):
         utils.HASH_PATH_PREFIX = 'startcap'
-        self._orig_parsetype = mimetools.Message.parsetype
+        if six.PY2:
+            self._orig_parsetype = mimetools.Message.parsetype
 
     def tearDown(self):
-        mimetools.Message.parsetype = self._orig_parsetype
+        if six.PY2:
+            mimetools.Message.parsetype = self._orig_parsetype
 
     def test_monkey_patch_mimetools(self):
+        if six.PY3:
+            raise nose.SkipTest('test specific to Python 2')
+
         sio = StringIO('blah')
         self.assertEqual(mimetools.Message(sio).type, 'text/plain')
         sio = StringIO('blah')
@@ -376,7 +384,7 @@ class TestWSGI(unittest.TestCase):
                         with mock.patch('swift.common.wsgi.inspect'):
                             conf = wsgi.appconfig(conf_file)
                             logger = logging.getLogger('test')
-                            sock = listen(('localhost', 0))
+                            sock = listen_zero()
                             wsgi.run_server(conf, logger, sock)
         self.assertEqual('HTTP/1.0',
                          _wsgi.HttpProtocol.default_request_version)
@@ -426,7 +434,7 @@ class TestWSGI(unittest.TestCase):
                                getargspec=argspec_stub):
                 conf = wsgi.appconfig(conf_file)
                 logger = logging.getLogger('test')
-                sock = listen(('localhost', 0))
+                sock = listen_zero()
                 wsgi.run_server(conf, logger, sock)
 
         self.assertTrue(_wsgi.server.called)
@@ -463,7 +471,7 @@ class TestWSGI(unittest.TestCase):
                             with mock.patch('swift.common.wsgi.inspect'):
                                 conf = wsgi.appconfig(conf_dir)
                                 logger = logging.getLogger('test')
-                                sock = listen(('localhost', 0))
+                                sock = listen_zero()
                                 wsgi.run_server(conf, logger, sock)
                                 self.assertTrue(os.environ['TZ'] is not '')
 
@@ -518,7 +526,7 @@ class TestWSGI(unittest.TestCase):
                     with mock.patch('swift.common.wsgi.eventlet') as _eventlet:
                         conf = wsgi.appconfig(conf_file)
                         logger = logging.getLogger('test')
-                        sock = listen(('localhost', 0))
+                        sock = listen_zero()
                         wsgi.run_server(conf, logger, sock)
         self.assertEqual('HTTP/1.0',
                          _wsgi.HttpProtocol.default_request_version)
@@ -1242,6 +1250,8 @@ class TestWSGIContext(unittest.TestCase):
     def test_app_iter_is_closable(self):
 
         def app(env, start_response):
+            yield ''
+            yield ''
             start_response('200 OK', [('Content-Length', '25')])
             yield 'aaaaa'
             yield 'bbbbb'

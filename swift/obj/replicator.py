@@ -38,12 +38,16 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
 from swift.obj import ssync_sender
-from swift.obj.diskfile import DiskFileManager, get_data_dir, get_tmp_dir
+from swift.obj.diskfile import get_data_dir, get_tmp_dir, DiskFileRouter
 from swift.common.storage_policy import POLICIES, REPL_POLICY
 
 DEFAULT_RSYNC_TIMEOUT = 900
 
 hubs.use_hub(get_hub())
+
+
+def _do_listdir(partition, replication_cycle):
+    return (((partition + replication_cycle) % 10) == 0)
 
 
 class ObjectReplicator(Daemon):
@@ -73,7 +77,7 @@ class ObjectReplicator(Daemon):
         self.stats_interval = int(conf.get('stats_interval', '300'))
         self.ring_check_interval = int(conf.get('ring_check_interval', 15))
         self.next_check = time.time() + self.ring_check_interval
-        self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
+        self.replication_cycle = random.randint(0, 9)
         self.partition_times = []
         self.interval = int(conf.get('interval') or
                             conf.get('run_pause') or 30)
@@ -116,7 +120,7 @@ class ObjectReplicator(Daemon):
                                 'operation, please disable handoffs_first and '
                                 'handoff_delete before the next '
                                 'normal rebalance')
-        self._diskfile_mgr = DiskFileManager(conf, self.logger)
+        self._df_router = DiskFileRouter(conf, self.logger)
 
     def _zero_stats(self):
         """Zero out the stats."""
@@ -201,12 +205,9 @@ class ObjectReplicator(Daemon):
             if self.rsync_error_log_line_length:
                 error_line = error_line[:self.rsync_error_log_line_length]
             self.logger.error(error_line)
-        elif results:
-            self.logger.info(
-                _("Successful rsync of %(src)s at %(dst)s (%(time).03f)"),
-                {'src': args[-2], 'dst': args[-1], 'time': total_time})
         else:
-            self.logger.debug(
+            log_method = self.logger.info if results else self.logger.debug
+            log_method(
                 _("Successful rsync of %(src)s at %(dst)s (%(time).03f)"),
                 {'src': args[-2], 'dst': args[-1], 'time': total_time})
         return ret_val
@@ -357,12 +358,12 @@ class ObjectReplicator(Daemon):
                 handoff_partition_deleted = True
         except (Exception, Timeout):
             self.logger.exception(_("Error syncing handoff partition"))
+            self._add_failure_stats(failure_devs_info)
         finally:
             target_devs_info = set([(target_dev['replication_ip'],
                                      target_dev['device'])
                                     for target_dev in job['nodes']])
             self.stats['success'] += len(target_devs_info - failure_devs_info)
-            self._add_failure_stats(failure_devs_info)
             if not handoff_partition_deleted:
                 self.handoffs_remaining += 1
             self.partition_times.append(time.time() - begin)
@@ -404,11 +405,13 @@ class ObjectReplicator(Daemon):
         target_devs_info = set()
         failure_devs_info = set()
         begin = time.time()
+        df_mgr = self._df_router[job['policy']]
         try:
             hashed, local_hash = tpool_reraise(
-                self._diskfile_mgr._get_hashes, job['path'],
-                do_listdir=(self.replication_count % 10) == 0,
-                reclaim_age=self.reclaim_age)
+                df_mgr._get_hashes, job['path'],
+                do_listdir=_do_listdir(
+                    int(job['partition']),
+                    self.replication_cycle))
             self.suffix_hash += hashed
             self.logger.update_stats('suffix.hashes', hashed)
             attempts_left = len(job['nodes'])
@@ -434,8 +437,9 @@ class ObjectReplicator(Daemon):
                             node['device'], job['partition'], 'REPLICATE',
                             '', headers=headers).getresponse()
                         if resp.status == HTTP_INSUFFICIENT_STORAGE:
-                            self.logger.error(_('%(ip)s/%(device)s responded'
-                                                ' as unmounted'), node)
+                            self.logger.error(
+                                _('%(replication_ip)s/%(device)s '
+                                  'responded as unmounted'), node)
                             attempts_left += 1
                             failure_devs_info.add((node['replication_ip'],
                                                    node['device']))
@@ -457,9 +461,8 @@ class ObjectReplicator(Daemon):
                         self.stats['hashmatch'] += 1
                         continue
                     hashed, recalc_hash = tpool_reraise(
-                        self._diskfile_mgr._get_hashes,
-                        job['path'], recalculate=suffixes,
-                        reclaim_age=self.reclaim_age)
+                        df_mgr._get_hashes,
+                        job['path'], recalculate=suffixes)
                     self.logger.update_stats('suffix.hashes', hashed)
                     local_hash = recalc_hash
                     suffixes = [suffix for suffix in local_hash if
@@ -490,10 +493,10 @@ class ObjectReplicator(Daemon):
             self.suffix_count += len(local_hash)
         except (Exception, Timeout):
             failure_devs_info.update(target_devs_info)
+            self._add_failure_stats(failure_devs_info)
             self.logger.exception(_("Error syncing partition"))
         finally:
             self.stats['success'] += len(target_devs_info - failure_devs_info)
-            self._add_failure_stats(failure_devs_info)
             self.partition_times.append(time.time() - begin)
             self.logger.timing_since('partition.update.timing', begin)
 
@@ -574,6 +577,7 @@ class ObjectReplicator(Daemon):
         using replication style storage policy
         """
         jobs = []
+        df_mgr = self._df_router[policy]
         self.all_devs_info.update(
             [(dev['replication_ip'], dev['device'])
              for dev in policy.object_ring.devs if dev])
@@ -600,7 +604,8 @@ class ObjectReplicator(Daemon):
                 self.logger.warning(
                     _('%s is not mounted'), local_dev['device'])
                 continue
-            unlink_older_than(tmp_path, time.time() - self.reclaim_age)
+            unlink_older_than(tmp_path, time.time() -
+                              df_mgr.reclaim_age)
             if not os.path.exists(obj_path):
                 try:
                     mkdirs(obj_path)
@@ -610,6 +615,11 @@ class ObjectReplicator(Daemon):
             for partition in os.listdir(obj_path):
                 if (override_partitions is not None
                         and partition not in override_partitions):
+                    continue
+
+                if (partition.startswith('auditor_status_') and
+                        partition.endswith('.json')):
+                    # ignore auditor status files
                     continue
 
                 part_nodes = None
@@ -689,6 +699,7 @@ class ObjectReplicator(Daemon):
         self.suffix_hash = 0
         self.replication_count = 0
         self.last_replication_count = -1
+        self.replication_cycle = (self.replication_cycle + 1) % 10
         self.partition_times = []
         self.my_replication_ips = self._get_my_replication_ips()
         self.all_devs_info = set()

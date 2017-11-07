@@ -17,18 +17,24 @@
 
 from __future__ import print_function
 
-from eventlet.green import urllib2, socket
+from eventlet.green import socket
 from six.moves.urllib.parse import urlparse
-from swift.common.utils import SWIFT_CONF_FILE
+
+from swift.common.utils import SWIFT_CONF_FILE, md5_hash_for_file
 from swift.common.ring import Ring
 from swift.common.storage_policy import POLICIES
-from hashlib import md5
 import eventlet
 import json
 import optparse
 import time
 import sys
+import six
 import os
+
+if six.PY3:
+    from eventlet.green.urllib import request as urllib2
+else:
+    from eventlet.green import urllib2
 
 
 def seconds2timeunit(seconds):
@@ -188,21 +194,6 @@ class SwiftRecon(object):
         else:
             return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
-    def _md5_file(self, path):
-        """
-        Get the MD5 checksum of a file.
-
-        :param path: path to file
-        :returns: MD5 checksum, hex encoded
-        """
-        md5sum = md5()
-        with open(path, 'rb') as f:
-            block = f.read(4096)
-            while block:
-                md5sum.update(block)
-                block = f.read(4096)
-        return md5sum.hexdigest()
-
     def get_hosts(self, region_filter, zone_filter, swift_dir, ring_names):
         """
         Get a list of hosts in the rings.
@@ -233,24 +224,18 @@ class SwiftRecon(object):
         matches = 0
         errors = 0
         ring_names = set()
-        for server_type in ('account', 'container'):
-            ring_name = '%s.ring.gz' % server_type
+        if self.server_type == 'object':
+            for ring_name in os.listdir(swift_dir):
+                if ring_name.startswith('object') and \
+                        ring_name.endswith('.ring.gz'):
+                    ring_names.add(ring_name)
+        else:
+            ring_name = '%s.ring.gz' % self.server_type
             ring_names.add(ring_name)
-        # include any other object ring files
-        for ring_name in os.listdir(swift_dir):
-            if ring_name.startswith('object') and \
-                    ring_name.endswith('ring.gz'):
-                ring_names.add(ring_name)
         rings = {}
         for ring_name in ring_names:
-            md5sum = md5()
-            with open(os.path.join(swift_dir, ring_name), 'rb') as f:
-                block = f.read(4096)
-                while block:
-                    md5sum.update(block)
-                    block = f.read(4096)
-            ring_sum = md5sum.hexdigest()
-            rings[ring_name] = ring_sum
+            rings[ring_name] = md5_hash_for_file(
+                os.path.join(swift_dir, ring_name))
         recon = Scout("ringmd5", self.verbose, self.suppress_errors,
                       self.timeout)
         print("[%s] Checking ring md5sums" % self._ptime())
@@ -265,6 +250,8 @@ class SwiftRecon(object):
             success = True
             for remote_ring_file, remote_ring_sum in response.items():
                 remote_ring_name = os.path.basename(remote_ring_file)
+                if not remote_ring_name.startswith(self.server_type):
+                    continue
                 ring_sum = rings.get(remote_ring_name, None)
                 if remote_ring_sum != ring_sum:
                     success = False
@@ -290,7 +277,7 @@ class SwiftRecon(object):
         """
         matches = 0
         errors = 0
-        conf_sum = self._md5_file(SWIFT_CONF_FILE)
+        conf_sum = md5_hash_for_file(SWIFT_CONF_FILE)
         recon = Scout("swiftconfmd5", self.verbose, self.suppress_errors,
                       self.timeout)
         printfn("[%s] Checking swift.conf md5sum" % self._ptime())

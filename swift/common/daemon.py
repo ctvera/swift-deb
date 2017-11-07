@@ -46,9 +46,10 @@ class Daemon(object):
         utils.capture_stdio(self.logger, **kwargs)
 
         def kill_children(*args):
+            self.logger.info('SIGTERM received')
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             os.killpg(0, signal.SIGTERM)
-            sys.exit()
+            os._exit(0)
 
         signal.signal(signal.SIGTERM, kill_children)
         if once:
@@ -74,8 +75,13 @@ def run_daemon(klass, conf_file, section_name='', once=False, **kwargs):
     if section_name is '':
         section_name = sub(r'([a-z])([A-Z])', r'\1-\2',
                            klass.__name__).lower()
-    conf = utils.readconf(conf_file, section_name,
-                          log_name=kwargs.get('log_name'))
+    try:
+        conf = utils.readconf(conf_file, section_name,
+                              log_name=kwargs.get('log_name'))
+    except (ValueError, IOError) as e:
+        # The message will be printed to stderr
+        # and results in an exit code of 1.
+        sys.exit(e)
 
     # once on command line (i.e. daemonize=false) will over-ride config
     once = once or not utils.config_true_value(conf.get('daemonize', 'true'))
@@ -87,6 +93,9 @@ def run_daemon(klass, conf_file, section_name='', once=False, **kwargs):
         logger = utils.get_logger(conf, conf.get('log_name', section_name),
                                   log_to_console=kwargs.pop('verbose', False),
                                   log_route=section_name)
+
+    # optional nice/ionice priority scheduling
+    utils.modify_priority(conf, logger)
 
     # disable fallocate if desired
     if utils.config_true_value(conf.get('disable_fallocate', 'no')):

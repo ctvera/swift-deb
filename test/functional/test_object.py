@@ -113,7 +113,7 @@ class TestObject(unittest2.TestCase):
                 body = resp.read()
                 if resp.status == 404:
                     break
-                self.assertTrue(resp.status // 100 == 2, resp.status)
+                self.assertEqual(resp.status // 100, 2, resp.status)
                 objs = json.loads(body)
                 if not objs:
                     break
@@ -273,6 +273,12 @@ class TestObject(unittest2.TestCase):
         })
 
     def test_if_none_match(self):
+        def delete(url, token, parsed, conn):
+            conn.request('DELETE', '%s/%s/%s' % (
+                parsed.path, self.container, 'if_none_match_test'), '',
+                {'X-Auth-Token': token})
+            return check_response(conn)
+
         def put(url, token, parsed, conn):
             conn.request('PUT', '%s/%s/%s' % (
                 parsed.path, self.container, 'if_none_match_test'), '',
@@ -286,6 +292,13 @@ class TestObject(unittest2.TestCase):
         resp = retry(put)
         resp.read()
         self.assertEqual(resp.status, 412)
+
+        resp = retry(delete)
+        resp.read()
+        self.assertEqual(resp.status, 204)
+        resp = retry(put)
+        resp.read()
+        self.assertEqual(resp.status, 201)
 
         def put(url, token, parsed, conn):
             conn.request('PUT', '%s/%s/%s' % (

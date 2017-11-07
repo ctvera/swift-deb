@@ -12,7 +12,7 @@
 # implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import collections
 import unittest
 import os
 import mock
@@ -26,10 +26,10 @@ from collections import defaultdict
 from errno import ENOENT, ENOTEMPTY, ENOTDIR
 
 from eventlet.green import subprocess
-from eventlet import Timeout, tpool
+from eventlet import Timeout
 
 from test.unit import (debug_logger, patch_policies, make_timestamp_iter,
-                       mocked_http_conn)
+                       mocked_http_conn, FakeLogger)
 from swift.common import utils
 from swift.common.utils import (hash_path, mkdirs, normalize_timestamp,
                                 storage_directory)
@@ -148,7 +148,8 @@ def _create_test_rings(path, devs=None):
         {'id': 3, 'device': 'sda', 'zone': 4,
          'region': 2, 'ip': '127.0.0.3', 'port': 6200},
         {'id': 4, 'device': 'sda', 'zone': 5,
-         'region': 1, 'ip': '127.0.0.4', 'port': 6200},
+         'region': 1, 'ip': '127.0.0.4', 'port': 6200,
+         'replication_ip': '127.0.1.4'},
         {'id': 5, 'device': 'sda', 'zone': 6,
          'region': 3, 'ip': 'fe80::202:b3ff:fe1e:8329', 'port': 6200},
         {'id': 6, 'device': 'sda', 'zone': 7, 'region': 1,
@@ -234,7 +235,7 @@ class TestObjectReplicator(unittest.TestCase):
                                  config,
                              ))
 
-    def _write_disk_data(self, disk_name):
+    def _write_disk_data(self, disk_name, with_json=False):
         os.mkdir(os.path.join(self.devices, disk_name))
         objects = os.path.join(self.devices, disk_name,
                                diskfile.get_data_dir(POLICIES[0]))
@@ -249,6 +250,13 @@ class TestObjectReplicator(unittest.TestCase):
             os.mkdir(parts[part])
             parts_1[part] = os.path.join(objects_1, part)
             os.mkdir(parts_1[part])
+
+        if with_json:
+            for json_file in ['auditor_status_ZBF.json',
+                              'auditor_status_ALL.json']:
+                for obj_dir in [objects, objects_1]:
+                    with open(os.path.join(obj_dir, json_file), 'w'):
+                        pass
 
         return objects, objects_1, parts, parts_1
 
@@ -304,11 +312,20 @@ class TestObjectReplicator(unittest.TestCase):
         for node in nodes:
             process_arg_checker.append(
                 (0, '', ['rsync', whole_path_from, rsync_mods]))
+        start = replicator.replication_cycle
+        self.assertGreaterEqual(start, 0)
+        self.assertLessEqual(start, 9)
         with _mock_process(process_arg_checker):
             replicator.run_once()
+        self.assertEqual((start + 1) % 10, replicator.replication_cycle)
         self.assertFalse(process_errors)
         self.assertFalse(self.logger.get_lines_for_level('error'))
         object_replicator.http_connect = was_connector
+        with _mock_process(process_arg_checker):
+            for cycle in range(1, 10):
+                replicator.run_once()
+                self.assertEqual((start + 1 + cycle) % 10,
+                                 replicator.replication_cycle)
 
     # policy 1
     def test_run_once_1(self):
@@ -416,6 +433,32 @@ class TestObjectReplicator(unittest.TestCase):
                 self.assertEqual(node['device'], 'sda')
             self.assertEqual(jobs_by_pol_part[part]['path'],
                              os.path.join(self.objects_1, part[1:]))
+
+    def test_collect_jobs_failure_report_with_auditor_stats_json(self):
+        devs = [
+            {'id': 0, 'device': 'sda', 'zone': 0,
+             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
+             'replication_ip': '127.0.0.0', 'replication_port': 6200},
+            {'id': 1, 'device': 'sdb', 'zone': 1,
+             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
+             'replication_ip': '127.0.0.0', 'replication_port': 6200},
+            {'id': 2, 'device': 'sdc', 'zone': 2,
+             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
+             'replication_ip': '127.0.0.1', 'replication_port': 6200},
+            {'id': 3, 'device': 'sdd', 'zone': 3,
+             'region': 1, 'ip': '1.1.1.1', 'port': 1111,
+             'replication_ip': '127.0.0.1', 'replication_port': 6200},
+        ]
+        objects_sdb, objects_1_sdb, _, _ = \
+            self._write_disk_data('sdb', with_json=True)
+        objects_sdc, objects_1_sdc, _, _ = \
+            self._write_disk_data('sdc', with_json=True)
+        objects_sdd, objects_1_sdd, _, _ = \
+            self._write_disk_data('sdd', with_json=True)
+        _create_test_rings(self.testdir, devs)
+
+        self.replicator.collect_jobs()
+        self.assertEqual(self.replicator.stats['failure'], 0)
 
     @mock.patch('swift.obj.replicator.random.shuffle', side_effect=lambda l: l)
     def test_collect_jobs_multi_disk(self, mock_shuffle):
@@ -1580,68 +1623,80 @@ class TestObjectReplicator(unittest.TestCase):
             object_replicator.http_connect = was_connector
 
     def test_run_once_recover_from_timeout(self):
+        # verify that replicator will pass over all policies' partitions even
+        # if a timeout occurs while replicating one partition to one node.
+        timeouts = [Timeout()]
+
+        def fake_get_hashes(df_mgr, part_path, **kwargs):
+            self.get_hash_count += 1
+            # Simulate a REPLICATE timeout by raising Timeout for second call
+            # to get_hashes (with recalculate suffixes) for a specific
+            # partition
+            if (timeouts and '/objects/' in part_path and
+                    part_path.endswith('0') and 'recalculate' in kwargs):
+                raise timeouts.pop(0)
+            return 1, {'abc': 'def'}
+
+        # map partition_path -> [nodes]
+        sync_paths = collections.defaultdict(list)
+
+        def fake_sync(node, job, suffixes, *args, **kwargs):
+            sync_paths[job['path']].append(node)
+            return True, {}
+
         conf = dict(swift_dir=self.testdir, devices=self.devices,
-                    bind_ips=_ips()[0],
+                    bind_ip=_ips()[0],  # local dev has id=0
                     mount_check='false', timeout='300', stats_interval='1')
-        replicator = object_replicator.ObjectReplicator(conf)
-        was_connector = object_replicator.http_connect
-        was_get_hashes = object_replicator.DiskFileManager._get_hashes
-        was_execute = tpool.execute
-        self.get_hash_count = 0
-        try:
+        with mock.patch('swift.obj.diskfile.DiskFileManager._get_hashes',
+                        fake_get_hashes):
+            with mock.patch('swift.obj.replicator.http_connect',
+                            mock_http_connect(200)):
+                with mock.patch('swift.obj.replicator.dump_recon_cache'):
+                    replicator = object_replicator.ObjectReplicator(
+                        conf, logger=FakeLogger())
 
-            def fake_get_hashes(*args, **kwargs):
-                self.get_hash_count += 1
-                if self.get_hash_count == 3:
-                    # raise timeout on last call to get hashes
-                    raise Timeout()
-                return 2, {'abc': 'def'}
+                    self.get_hash_count = 0
+                    with mock.patch.object(replicator, 'sync', fake_sync):
+                        replicator.run_once()
 
-            def fake_exc(tester, *args, **kwargs):
-                if 'Error syncing partition' in args[0]:
-                    tester.i_failed = True
+        log_lines = replicator.logger.get_lines_for_level('error')
+        self.assertIn("Error syncing with node:", log_lines[0])
+        self.assertFalse(log_lines[1:])
+        # setup creates 4 partitions; partition 1 does not map to local dev id
+        # 0 so will be handled by update_delete(); partitions 0, 2, 3 are
+        # handled by update() for each of two policies, so expect 6 paths to be
+        # sync'd
+        self.assertEqual(6, len(sync_paths))
+        # partition 3 has 2 nodes in remote region, only first node is sync'd.
+        # partition 0 in policy 0 has fake_get_hashes timeout before first
+        # sync, so only second node is sync'd.
+        # other partitions are sync'd to 2 nodes in same region.
+        expected_node_count = {  # map path_end -> expected sync node count
+            '/objects/0': 1,
+            '/objects/1': 2,
+            '/objects/2': 2,
+            '/objects/3': 1,
+            '/objects-1/0': 2,
+            '/objects-1/1': 2,
+            '/objects-1/2': 2,
+            '/objects-1/3': 1
+        }
+        for path, nodes in sync_paths.items():
+            path_end = path[path.index('/objects'):]
+            self.assertEqual(expected_node_count[path_end], len(nodes),
+                             'Expected %s but got %s for path %s' %
+                             (expected_node_count[path_end], len(nodes), path))
+        # partitions 0 and 2 attempt 3 calls each per policy to get_hashes = 12
+        # partitions 3 attempts 2 calls per policy to get_hashes = 4
+        # partitions 1 dosn't get_hashes because of update_deleted
+        self.assertEqual(16, self.get_hash_count)
 
-            self.i_failed = False
-            object_replicator.http_connect = mock_http_connect(200)
-            object_replicator.DiskFileManager._get_hashes = fake_get_hashes
-            replicator.logger.exception = \
-                lambda *args, **kwargs: fake_exc(self, *args, **kwargs)
-            # Write some files into '1' and run replicate- they should be moved
-            # to the other partitions and then node should get deleted.
-            cur_part = '1'
-            df = self.df_mgr.get_diskfile('sda', cur_part, 'a', 'c', 'o',
-                                          policy=POLICIES.legacy)
-            mkdirs(df._datadir)
-            f = open(os.path.join(df._datadir,
-                                  normalize_timestamp(time.time()) + '.data'),
-                     'wb')
-            f.write('1234567890')
-            f.close()
-            ohash = hash_path('a', 'c', 'o')
-            data_dir = ohash[-3:]
-            whole_path_from = os.path.join(self.objects, cur_part, data_dir)
-            process_arg_checker = []
-            ring = replicator.load_object_ring(POLICIES[0])
-            nodes = [node for node in
-                     ring.get_part_nodes(int(cur_part))
-                     if node['ip'] not in _ips()]
-
-            for node in nodes:
-                rsync_mod = '%s::object/sda/objects/%s' % (node['ip'],
-                                                           cur_part)
-                process_arg_checker.append(
-                    (0, '', ['rsync', whole_path_from, rsync_mod]))
-            self.assertTrue(os.access(os.path.join(self.objects,
-                                                   '1', data_dir, ohash),
-                                      os.F_OK))
-            with _mock_process(process_arg_checker):
-                replicator.run_once()
-            self.assertFalse(process_errors)
-            self.assertFalse(self.i_failed)
-        finally:
-            object_replicator.http_connect = was_connector
-            object_replicator.DiskFileManager._get_hashes = was_get_hashes
-            tpool.execute = was_execute
+        # attempt to 16 times but succeeded only 15 times due to Timeout
+        suffix_hashes = sum(
+            count for (metric, count), _junk in
+            replicator.logger.log_dict['update_stats']
+            if metric == 'suffix.hashes')
+        self.assertEqual(15, suffix_hashes)
 
     def test_run(self):
         with _mock_process([(0, '')] * 100):
@@ -1661,9 +1716,10 @@ class TestObjectReplicator(unittest.TestCase):
         self.replicator.sync_method.assert_called_once_with(
             'node', 'job', 'suffixes')
 
-    @mock.patch('swift.obj.replicator.tpool_reraise', autospec=True)
+    @mock.patch('swift.obj.replicator.tpool_reraise')
     @mock.patch('swift.obj.replicator.http_connect', autospec=True)
-    def test_update(self, mock_http, mock_tpool_reraise):
+    @mock.patch('swift.obj.replicator._do_listdir')
+    def test_update(self, mock_do_listdir, mock_http, mock_tpool_reraise):
 
         def set_default(self):
             self.replicator.suffix_count = 0
@@ -1674,7 +1730,6 @@ class TestObjectReplicator(unittest.TestCase):
 
         self.headers = {'Content-Length': '0',
                         'user-agent': 'object-replicator %s' % os.getpid()}
-        self.replicator.logger = mock_logger = mock.MagicMock()
         mock_tpool_reraise.return_value = (0, {})
 
         all_jobs = self.replicator.collect_jobs()
@@ -1682,18 +1737,40 @@ class TestObjectReplicator(unittest.TestCase):
 
         mock_http.return_value = answer = mock.MagicMock()
         answer.getresponse.return_value = resp = mock.MagicMock()
-        # Check uncorrect http_connect with status 507 and
+        # Check incorrect http_connect with status 507 and
         # count of attempts and call args
         resp.status = 507
-        error = '%(ip)s/%(device)s responded as unmounted'
-        expect = 'Error syncing partition'
+        error = '%(replication_ip)s/%(device)s responded as unmounted'
+        expect = 'Error syncing partition: '
+        expected_listdir_calls = [
+            mock.call(int(job['partition']),
+                      self.replicator.replication_cycle)
+            for job in jobs]
+        do_listdir_results = [False, False, True, False, True, False]
+        mock_do_listdir.side_effect = do_listdir_results
+        expected_tpool_calls = [
+            mock.call(self.replicator._df_router[job['policy']]._get_hashes,
+                      job['path'],
+                      do_listdir=do_listdir)
+            for job, do_listdir in zip(jobs, do_listdir_results)
+        ]
         for job in jobs:
             set_default(self)
             ring = job['policy'].object_ring
             self.headers['X-Backend-Storage-Policy-Index'] = int(job['policy'])
             self.replicator.update(job)
-            self.assertTrue(error in mock_logger.error.call_args[0][0])
-            self.assertTrue(expect in mock_logger.exception.call_args[0][0])
+            error_lines = self.logger.get_lines_for_level('error')
+            expected = []
+            # ... first the primaries
+            for node in job['nodes']:
+                expected.append(error % node)
+            # ... then it will get handoffs
+            for node in job['policy'].object_ring.get_more_nodes(
+                    int(job['partition'])):
+                expected.append(error % node)
+            # ... and finally it will exception out
+            expected.append(expect)
+            self.assertEqual(expected, error_lines)
             self.assertEqual(len(self.replicator.partition_times), 1)
             self.assertEqual(mock_http.call_count, len(ring._devs) - 1)
             reqs = []
@@ -1705,28 +1782,38 @@ class TestObjectReplicator(unittest.TestCase):
                 self.assertEqual(self.replicator.suffix_hash, 0)
             mock_http.assert_has_calls(reqs, any_order=True)
             mock_http.reset_mock()
-            mock_logger.reset_mock()
-
-        # Check uncorrect http_connect with status 400 != HTTP_OK
+            self.logger.clear()
+        mock_do_listdir.assert_has_calls(expected_listdir_calls)
+        mock_tpool_reraise.assert_has_calls(expected_tpool_calls)
+        mock_do_listdir.side_effect = None
+        mock_do_listdir.return_value = False
+        # Check incorrect http_connect with status 400 != HTTP_OK
         resp.status = 400
         error = 'Invalid response %(resp)s from %(ip)s'
         for job in jobs:
             set_default(self)
             self.replicator.update(job)
-            self.assertTrue(error in mock_logger.error.call_args[0][0])
+            # ... only the primaries
+            expected = [error % {'resp': 400, 'ip': node['replication_ip']}
+                        for node in job['nodes']]
+            self.assertEqual(expected,
+                             self.logger.get_lines_for_level('error'))
             self.assertEqual(len(self.replicator.partition_times), 1)
-            mock_logger.reset_mock()
+            self.logger.clear()
 
         # Check successful http_connection and exception with
-        # uncorrect pickle.loads(resp.read())
+        # incorrect pickle.loads(resp.read())
         resp.status = 200
-        expect = 'Error syncing with node:'
+        expect = 'Error syncing with node: %r: '
         for job in jobs:
             set_default(self)
             self.replicator.update(job)
-            self.assertTrue(expect in mock_logger.exception.call_args[0][0])
+            # ... only the primaries
+            expected = [expect % node for node in job['nodes']]
+            error_lines = self.logger.get_lines_for_level('error')
+            self.assertEqual(expected, error_lines)
             self.assertEqual(len(self.replicator.partition_times), 1)
-            mock_logger.reset_mock()
+            self.logger.clear()
 
         # Check successful http_connection and correct
         # pickle.loads(resp.read()) for non local node
@@ -1740,13 +1827,12 @@ class TestObjectReplicator(unittest.TestCase):
                 local_job = job.copy()
                 continue
             self.replicator.update(job)
-            self.assertEqual(mock_logger.exception.call_count, 0)
-            self.assertEqual(mock_logger.error.call_count, 0)
+            self.assertEqual([], self.logger.get_lines_for_level('error'))
             self.assertEqual(len(self.replicator.partition_times), 1)
             self.assertEqual(self.replicator.suffix_hash, 0)
             self.assertEqual(self.replicator.suffix_sync, 0)
             self.assertEqual(self.replicator.suffix_count, 0)
-            mock_logger.reset_mock()
+            self.logger.clear()
 
         # Check successful http_connect and sync for local node
         mock_tpool_reraise.return_value = (1, {'a83': 'ba47fd314242ec8c'
@@ -1787,7 +1873,7 @@ class TestObjectReplicator(unittest.TestCase):
         self.assertEqual(self.replicator.suffix_count, 1)
 
         mock_http.reset_mock()
-        mock_logger.reset_mock()
+        self.logger.clear()
 
         # test for replication params on policy 0 only
         repl_job = local_job.copy()
@@ -1816,37 +1902,59 @@ class TestObjectReplicator(unittest.TestCase):
         jobs = self.replicator.collect_jobs()
         _m_rsync = mock.Mock(return_value=0)
         _m_os_path_exists = mock.Mock(return_value=True)
-        with mock.patch.object(self.replicator, '_rsync', _m_rsync):
-            with mock.patch('os.path.exists', _m_os_path_exists):
-                for job in jobs:
-                    self.assertTrue('region' in job)
-                    for node in job['nodes']:
-                        for rsync_compress in (True, False):
-                            self.replicator.rsync_compress = rsync_compress
-                            ret = \
-                                self.replicator.sync(node, job,
-                                                     ['fake_suffix'])
-                            self.assertTrue(ret)
-                            if node['region'] != job['region']:
-                                if rsync_compress:
-                                    # --compress arg should be passed to rsync
-                                    # binary only when rsync_compress option is
-                                    # enabled AND destination node is in a
-                                    # different region
-                                    self.assertTrue('--compress' in
-                                                    _m_rsync.call_args[0][0])
-                                else:
-                                    self.assertFalse('--compress' in
-                                                     _m_rsync.call_args[0][0])
+        with mock.patch.object(self.replicator, '_rsync', _m_rsync), \
+                mock.patch('os.path.exists', _m_os_path_exists):
+            for job in jobs:
+                self.assertTrue('region' in job)
+                for node in job['nodes']:
+                    for rsync_compress in (True, False):
+                        self.replicator.rsync_compress = rsync_compress
+                        ret = self.replicator.sync(node, job,
+                                                   ['fake_suffix'])
+                        self.assertTrue(ret)
+                        if node['region'] != job['region']:
+                            if rsync_compress:
+                                # --compress arg should be passed to rsync
+                                # binary only when rsync_compress option is
+                                # enabled AND destination node is in a
+                                # different region
+                                self.assertTrue('--compress' in
+                                                _m_rsync.call_args[0][0])
                             else:
                                 self.assertFalse('--compress' in
                                                  _m_rsync.call_args[0][0])
-                            self.assertEqual(
-                                _m_os_path_exists.call_args_list[-1][0][0],
-                                os.path.join(job['path'], 'fake_suffix'))
-                            self.assertEqual(
-                                _m_os_path_exists.call_args_list[-2][0][0],
-                                os.path.join(job['path']))
+                        else:
+                            self.assertFalse('--compress' in
+                                             _m_rsync.call_args[0][0])
+                        self.assertEqual(
+                            _m_os_path_exists.call_args_list[-1][0][0],
+                            os.path.join(job['path'], 'fake_suffix'))
+                        self.assertEqual(
+                            _m_os_path_exists.call_args_list[-2][0][0],
+                            os.path.join(job['path']))
+
+    def test_do_listdir(self):
+        # Test if do_listdir is enabled for every 10th partition to rehash
+        # First number is the number of partitions in the job, list entries
+        # are the expected partition numbers per run
+        test_data = {
+            9: [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            29: [3, 2, 3, 3, 3, 3, 3, 3, 3, 3],
+            111: [12, 11, 11, 11, 11, 11, 11, 11, 11, 11]}
+
+        for partitions, expected in test_data.items():
+            seen = []
+            for phase in range(10):
+                invalidated = 0
+                for partition in range(partitions):
+                    if object_replicator._do_listdir(partition, phase):
+                        seen.append(partition)
+                        invalidated += 1
+                # Every 10th partition is seen after each phase
+                self.assertEqual(expected[phase], invalidated)
+
+            # After 10 cycles every partition is seen exactly once
+            self.assertEqual(sorted(range(partitions)), sorted(seen))
 
 
 if __name__ == '__main__':

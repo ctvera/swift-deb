@@ -26,9 +26,11 @@ from io import BufferedReader
 from hashlib import md5
 from itertools import chain
 from tempfile import NamedTemporaryFile
+import sys
 
 from six.moves import range
 
+from swift.common.exceptions import RingLoadError
 from swift.common.utils import hash_path, validate_configuration
 from swift.common.ring.utils import tiers_for_dev
 
@@ -69,10 +71,15 @@ class RingData(object):
         if metadata_only:
             return ring_dict
 
+        byteswap = (ring_dict.get('byteorder', sys.byteorder) != sys.byteorder)
+
         partition_count = 1 << (32 - ring_dict['part_shift'])
         for x in range(ring_dict['replica_count']):
-            ring_dict['replica2part2dev_id'].append(
-                array.array('H', gz_file.read(2 * partition_count)))
+            part2dev = array.array('H', gz_file.read(2 * partition_count))
+            if byteswap:
+                part2dev.byteswap()
+            ring_dict['replica2part2dev_id'].append(part2dev)
+
         return ring_dict
 
     @classmethod
@@ -116,7 +123,8 @@ class RingData(object):
         json_encoder = json.JSONEncoder(sort_keys=True)
         json_text = json_encoder.encode(
             {'devs': ring['devs'], 'part_shift': ring['part_shift'],
-             'replica_count': len(ring['replica2part2dev_id'])})
+             'replica_count': len(ring['replica2part2dev_id']),
+             'byteorder': sys.byteorder})
         json_len = len(json_text)
         file_obj.write(struct.pack('!I', json_len))
         file_obj.write(json_text)
@@ -156,9 +164,14 @@ class Ring(object):
 
     :param serialized_path: path to serialized RingData instance
     :param reload_time: time interval in seconds to check for a ring change
+    :param ring_name: ring name string (basically specified from policy)
+    :param validation_hook: hook point to validate ring configuration ontime
+
+    :raises: RingLoadError if the loaded ring data violates its constraint
     """
 
-    def __init__(self, serialized_path, reload_time=15, ring_name=None):
+    def __init__(self, serialized_path, reload_time=15, ring_name=None,
+                 validation_hook=lambda ring_data: None):
         # can't use the ring unless HASH_PATH_SUFFIX is set
         validate_configuration()
         if ring_name:
@@ -167,12 +180,24 @@ class Ring(object):
         else:
             self.serialized_path = os.path.join(serialized_path)
         self.reload_time = reload_time
+        self._validation_hook = validation_hook
         self._reload(force=True)
 
     def _reload(self, force=False):
         self._rtime = time() + self.reload_time
         if force or self.has_changed():
             ring_data = RingData.load(self.serialized_path)
+
+            try:
+                self._validation_hook(ring_data)
+            except RingLoadError:
+                if force:
+                    raise
+                else:
+                    # In runtime reload at working server, it's ok to use old
+                    # ring data if the new ring data is invalid.
+                    return
+
             self._mtime = getmtime(self.serialized_path)
             self._devs = ring_data.devs
             # NOTE(akscram): Replication parameters like replication_ip

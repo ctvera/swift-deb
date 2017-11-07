@@ -12,7 +12,9 @@
 # limitations under the License.
 
 """ Tests for swift.common.storage_policies """
+import contextlib
 import six
+import logging
 import unittest
 import os
 import mock
@@ -20,13 +22,35 @@ from functools import partial
 from six.moves.configparser import ConfigParser
 from tempfile import NamedTemporaryFile
 from test.unit import patch_policies, FakeRing, temptree, DEFAULT_TEST_EC_TYPE
+import swift.common.storage_policy
 from swift.common.storage_policy import (
     StoragePolicyCollection, POLICIES, PolicyError, parse_storage_policies,
     reload_storage_policies, get_policy_string, split_policy_string,
     BaseStoragePolicy, StoragePolicy, ECStoragePolicy, REPL_POLICY, EC_POLICY,
     VALID_EC_TYPES, DEFAULT_EC_OBJECT_SEGMENT_SIZE, BindPortsCache)
 from swift.common.ring import RingData
-from swift.common.exceptions import RingValidationError
+from swift.common.exceptions import RingLoadError
+from pyeclib.ec_iface import ECDriver
+
+
+class CapturingHandler(logging.Handler):
+    def __init__(self):
+        super(CapturingHandler, self).__init__()
+        self._records = []
+
+    def emit(self, record):
+        self._records.append(record)
+
+
+@contextlib.contextmanager
+def capture_logging(log_name):
+    captured = CapturingHandler()
+    logger = logging.getLogger(log_name)
+    logger.addHandler(captured)
+    try:
+        yield captured._records
+    finally:
+        logger.removeHandler(captured)
 
 
 @BaseStoragePolicy.register('fake')
@@ -129,7 +153,7 @@ class TestStoragePolicies(unittest.TestCase):
             self.assertEqual(policy_string, get_policy_string(*expected))
 
     def test_defaults(self):
-        self.assertTrue(len(POLICIES) > 0)
+        self.assertGreater(len(POLICIES), 0)
 
         # test class functions
         default_policy = POLICIES.default
@@ -580,6 +604,91 @@ class TestStoragePolicies(unittest.TestCase):
         self.assertRaisesWithMessage(
             PolicyError, "must specify a storage policy section "
             "for policy index 0", parse_storage_policies, bad_conf)
+
+    @mock.patch.object(swift.common.storage_policy, 'VALID_EC_TYPES',
+                       ['isa_l_rs_vand', 'isa_l_rs_cauchy'])
+    @mock.patch('swift.common.storage_policy.ECDriver')
+    def test_known_bad_ec_config(self, mock_driver):
+        good_conf = self._conf("""
+        [storage-policy:0]
+        name = bad-policy
+        policy_type = erasure_coding
+        ec_type = isa_l_rs_cauchy
+        ec_num_data_fragments = 10
+        ec_num_parity_fragments = 5
+        """)
+
+        with capture_logging('swift.common.storage_policy') as records:
+            parse_storage_policies(good_conf)
+        mock_driver.assert_called_once()
+        mock_driver.reset_mock()
+        self.assertFalse([(r.levelname, r.message) for r in records])
+
+        good_conf = self._conf("""
+        [storage-policy:0]
+        name = bad-policy
+        policy_type = erasure_coding
+        ec_type = isa_l_rs_vand
+        ec_num_data_fragments = 10
+        ec_num_parity_fragments = 4
+        """)
+
+        with capture_logging('swift.common.storage_policy') as records:
+            parse_storage_policies(good_conf)
+        mock_driver.assert_called_once()
+        mock_driver.reset_mock()
+        self.assertFalse([(r.levelname, r.message) for r in records])
+
+        bad_conf = self._conf("""
+        [storage-policy:0]
+        name = bad-policy
+        policy_type = erasure_coding
+        ec_type = isa_l_rs_vand
+        ec_num_data_fragments = 10
+        ec_num_parity_fragments = 5
+        """)
+
+        with capture_logging('swift.common.storage_policy') as records:
+            parse_storage_policies(bad_conf)
+        mock_driver.assert_called_once()
+        mock_driver.reset_mock()
+        self.assertEqual([r.levelname for r in records],
+                         ['WARNING', 'WARNING'])
+        for msg in ('known to harm data durability',
+                    'Any data in this policy should be migrated',
+                    'https://bugs.launchpad.net/swift/+bug/1639691'):
+            self.assertIn(msg, records[0].message)
+        self.assertIn('In a future release, this will prevent services from '
+                      'starting', records[1].message)
+
+        slightly_less_bad_conf = self._conf("""
+        [storage-policy:0]
+        name = bad-policy
+        policy_type = erasure_coding
+        ec_type = isa_l_rs_vand
+        ec_num_data_fragments = 10
+        ec_num_parity_fragments = 5
+        deprecated = true
+
+        [storage-policy:1]
+        name = good-policy
+        policy_type = erasure_coding
+        ec_type = isa_l_rs_cauchy
+        ec_num_data_fragments = 10
+        ec_num_parity_fragments = 5
+        default = true
+        """)
+
+        with capture_logging('swift.common.storage_policy') as records:
+            parse_storage_policies(slightly_less_bad_conf)
+        self.assertEqual(2, mock_driver.call_count)
+        mock_driver.reset_mock()
+        self.assertEqual([r.levelname for r in records],
+                         ['WARNING'])
+        for msg in ('known to harm data durability',
+                    'Any data in this policy should be migrated',
+                    'https://bugs.launchpad.net/swift/+bug/1639691'):
+            self.assertIn(msg, records[0].message)
 
     def test_no_default(self):
         orig_conf = self._conf("""
@@ -1145,23 +1254,32 @@ class TestStoragePolicies(unittest.TestCase):
         test_policies = [
             ECStoragePolicy(0, 'ec8-2', ec_type=DEFAULT_TEST_EC_TYPE,
                             ec_ndata=8, ec_nparity=2,
-                            object_ring=FakeRing(replicas=8),
                             is_default=True),
             ECStoragePolicy(1, 'ec10-4', ec_type=DEFAULT_TEST_EC_TYPE,
-                            ec_ndata=10, ec_nparity=4,
-                            object_ring=FakeRing(replicas=10)),
+                            ec_ndata=10, ec_nparity=4),
             ECStoragePolicy(2, 'ec4-2', ec_type=DEFAULT_TEST_EC_TYPE,
-                            ec_ndata=4, ec_nparity=2,
-                            object_ring=FakeRing(replicas=7)),
+                            ec_ndata=4, ec_nparity=2),
         ]
+        actual_load_ring_replicas = [8, 10, 7]
         policies = StoragePolicyCollection(test_policies)
 
-        for policy in policies:
-            msg = 'EC ring for policy %s needs to be configured with ' \
-                  'exactly %d nodes.' % \
-                  (policy.name, policy.ec_ndata + policy.ec_nparity)
-            self.assertRaisesWithMessage(RingValidationError, msg,
-                                         policy._validate_ring)
+        def create_mock_ring_data(num_replica):
+            class mock_ring_data_klass(object):
+                def __init__(self):
+                    self._replica2part2dev_id = [0] * num_replica
+
+            return mock_ring_data_klass()
+
+        for policy, ring_replicas in zip(policies, actual_load_ring_replicas):
+            with mock.patch('swift.common.ring.ring.RingData.load',
+                            return_value=create_mock_ring_data(ring_replicas)):
+                with mock.patch(
+                        'swift.common.ring.ring.validate_configuration'):
+                    msg = 'EC ring for policy %s needs to be configured with ' \
+                          'exactly %d replicas.' % \
+                          (policy.name, policy.ec_ndata + policy.ec_nparity)
+                    self.assertRaisesWithMessage(RingLoadError, msg,
+                                                 policy.load_ring, 'mock')
 
     def test_storage_policy_get_info(self):
         test_policies = [
@@ -1243,6 +1361,29 @@ class TestStoragePolicies(unittest.TestCase):
             self.assertEqual(policy.get_info(config=True), expected_info)
             expected_info = expected[(int(policy), False)]
             self.assertEqual(policy.get_info(config=False), expected_info)
+
+    def test_ec_fragment_size_cached(self):
+        policy = ECStoragePolicy(
+            0, 'ec2-1', ec_type=DEFAULT_TEST_EC_TYPE,
+            ec_ndata=2, ec_nparity=1, object_ring=FakeRing(replicas=3),
+            ec_segment_size=DEFAULT_EC_OBJECT_SEGMENT_SIZE, is_default=True)
+
+        ec_driver = ECDriver(ec_type=DEFAULT_TEST_EC_TYPE,
+                             k=2, m=1)
+        expected_fragment_size = ec_driver.get_segment_info(
+            DEFAULT_EC_OBJECT_SEGMENT_SIZE,
+            DEFAULT_EC_OBJECT_SEGMENT_SIZE)['fragment_size']
+
+        with mock.patch.object(
+                policy.pyeclib_driver, 'get_segment_info') as fake:
+            fake.return_value = {
+                'fragment_size': expected_fragment_size}
+
+            for x in range(10):
+                self.assertEqual(expected_fragment_size,
+                                 policy.fragment_size)
+                # pyeclib_driver.get_segment_info is called only once
+                self.assertEqual(1, fake.call_count)
 
 
 if __name__ == '__main__':

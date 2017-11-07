@@ -40,7 +40,7 @@ from six.moves.http_client import HTTPException
 from swift.common.middleware.memcache import MemcacheMiddleware
 from swift.common.storage_policy import parse_storage_policies, PolicyError
 
-from test import get_config
+from test import get_config, listen_zero
 from test.functional.swift_test_client import Account, Connection, Container, \
     ResponseError
 # This has the side effect of mocking out the xattr module so that unit tests
@@ -259,7 +259,7 @@ def _in_process_setup_ring(swift_conf, conf_src_dir, testdir):
             device = 'sd%c1' % chr(len(obj_sockets) + ord('a'))
             utils.mkdirs(os.path.join(_testdir, 'sda1'))
             utils.mkdirs(os.path.join(_testdir, 'sda1', 'tmp'))
-            obj_socket = eventlet.listen(('localhost', 0))
+            obj_socket = listen_zero()
             obj_sockets.append(obj_socket)
             dev['port'] = obj_socket.getsockname()[1]
             dev['ip'] = '127.0.0.1'
@@ -270,7 +270,7 @@ def _in_process_setup_ring(swift_conf, conf_src_dir, testdir):
     else:
         # make default test ring, 2 replicas, 4 partitions, 2 devices
         _info('No source object ring file, creating 2rep/4part/2dev ring')
-        obj_sockets = [eventlet.listen(('localhost', 0)) for _ in (0, 1)]
+        obj_sockets = [listen_zero() for _ in (0, 1)]
         ring_data = ring.RingData(
             [[0, 1, 0, 1], [1, 0, 1, 0]],
             [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
@@ -285,6 +285,56 @@ def _in_process_setup_ring(swift_conf, conf_src_dir, testdir):
         _debug('Ring file dev: %s' % dev)
 
     return obj_sockets
+
+
+def _load_encryption(proxy_conf_file, **kwargs):
+    """
+    Load encryption configuration and override proxy-server.conf contents.
+
+    :param proxy_conf_file: Source proxy conf filename
+    :returns: Path to the test proxy conf file to use
+    :raises InProcessException: raised if proxy conf contents are invalid
+    """
+    _debug('Setting configuration for encryption')
+
+    # The global conf dict cannot be used to modify the pipeline.
+    # The pipeline loader requires the pipeline to be set in the local_conf.
+    # If pipeline is set in the global conf dict (which in turn populates the
+    # DEFAULTS options) then it prevents pipeline being loaded into the local
+    # conf during wsgi load_app.
+    # Therefore we must modify the [pipeline:main] section.
+
+    conf = ConfigParser()
+    conf.read(proxy_conf_file)
+    try:
+        section = 'pipeline:main'
+        pipeline = conf.get(section, 'pipeline')
+        pipeline = pipeline.replace(
+            "proxy-logging proxy-server",
+            "keymaster encryption proxy-logging proxy-server")
+        conf.set(section, 'pipeline', pipeline)
+        root_secret = os.urandom(32).encode("base64")
+        conf.set('filter:keymaster', 'encryption_root_secret', root_secret)
+    except NoSectionError as err:
+        msg = 'Error problem with proxy conf file %s: %s' % \
+              (proxy_conf_file, err)
+        raise InProcessException(msg)
+
+    test_conf_file = os.path.join(_testdir, 'proxy-server.conf')
+    with open(test_conf_file, 'w') as fp:
+        conf.write(fp)
+
+    return test_conf_file
+
+
+# Mapping from possible values of the variable
+# SWIFT_TEST_IN_PROCESS_CONF_LOADER
+# to the method to call for loading the associated configuration
+# The expected signature for these methods is:
+# conf_filename_to_use loader(input_conf_filename, **kwargs)
+conf_loaders = {
+    'encryption': _load_encryption
+}
 
 
 def in_process_setup(the_object_server=object_server):
@@ -318,6 +368,26 @@ def in_process_setup(the_object_server=object_server):
     utils.mkdirs(os.path.join(_testdir, 'sdb1'))
     utils.mkdirs(os.path.join(_testdir, 'sdb1', 'tmp'))
 
+    # Call the associated method for the value of
+    # 'SWIFT_TEST_IN_PROCESS_CONF_LOADER', if one exists
+    conf_loader_label = os.environ.get(
+        'SWIFT_TEST_IN_PROCESS_CONF_LOADER')
+    if conf_loader_label is not None:
+        try:
+            conf_loader = conf_loaders[conf_loader_label]
+            _debug('Calling method %s mapped to conf loader %s' %
+                   (conf_loader.__name__, conf_loader_label))
+        except KeyError as missing_key:
+            raise InProcessException('No function mapped for conf loader %s' %
+                                     missing_key)
+
+        try:
+            # Pass-in proxy_conf
+            proxy_conf = conf_loader(proxy_conf)
+            _debug('Now using proxy conf %s' % proxy_conf)
+        except Exception as err:  # noqa
+            raise InProcessException(err)
+
     swift_conf = _in_process_setup_swift_conf(swift_conf_src, _testdir)
     obj_sockets = _in_process_setup_ring(swift_conf, conf_src_dir, _testdir)
 
@@ -346,7 +416,7 @@ def in_process_setup(the_object_server=object_server):
     # We create the proxy server listening socket to get its port number so
     # that we can add it as the "auth_port" value for the functional test
     # clients.
-    prolis = eventlet.listen(('localhost', 0))
+    prolis = listen_zero()
     _test_socks.append(prolis)
 
     # The following set of configuration values is used both for the
@@ -361,6 +431,7 @@ def in_process_setup(the_object_server=object_server):
         'allow_account_management': 'true',
         'account_autocreate': 'true',
         'allow_versions': 'True',
+        'allow_versioned_writes': 'True',
         # Below are values used by the functional test framework, as well as
         # by the various in-process swift servers
         'auth_host': '127.0.0.1',
@@ -402,10 +473,10 @@ def in_process_setup(the_object_server=object_server):
         config['object_post_as_copy'] = str(object_post_as_copy)
         _debug('Setting object_post_as_copy to %r' % object_post_as_copy)
 
-    acc1lis = eventlet.listen(('localhost', 0))
-    acc2lis = eventlet.listen(('localhost', 0))
-    con1lis = eventlet.listen(('localhost', 0))
-    con2lis = eventlet.listen(('localhost', 0))
+    acc1lis = listen_zero()
+    acc2lis = listen_zero()
+    con1lis = listen_zero()
+    con2lis = listen_zero()
     _test_socks += [acc1lis, acc2lis, con1lis, con2lis] + obj_sockets
 
     account_ring_path = os.path.join(_testdir, 'account.ring.gz')

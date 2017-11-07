@@ -23,12 +23,13 @@ from contextlib import closing
 from gzip import GzipFile
 from tempfile import mkdtemp
 from shutil import rmtree
-from test.unit import FakeLogger
+from test import listen_zero
+from test.unit import FakeLogger, make_timestamp_iter
+from test.unit import debug_logger, patch_policies, mocked_http_conn
 from time import time
 from distutils.dir_util import mkpath
 
-from eventlet import spawn, Timeout, listen
-from six.moves import range
+from eventlet import spawn, Timeout
 
 from swift.obj import updater as object_updater
 from swift.obj.diskfile import (ASYNCDIR_BASE, get_async_dir, DiskFileManager,
@@ -38,7 +39,6 @@ from swift.common import utils
 from swift.common.header_key_dict import HeaderKeyDict
 from swift.common.utils import hash_path, normalize_timestamp, mkdirs, \
     write_pickle
-from test.unit import debug_logger, patch_policies, mocked_http_conn
 from swift.common.storage_policy import StoragePolicy, POLICIES
 
 
@@ -78,20 +78,20 @@ class TestObjectUpdater(unittest.TestCase):
         rmtree(self.testdir, ignore_errors=1)
 
     def test_creation(self):
-        cu = object_updater.ObjectUpdater({
+        ou = object_updater.ObjectUpdater({
             'devices': self.devices_dir,
             'mount_check': 'false',
             'swift_dir': self.testdir,
             'interval': '1',
             'concurrency': '2',
             'node_timeout': '5.5'})
-        self.assertTrue(hasattr(cu, 'logger'))
-        self.assertTrue(cu.logger is not None)
-        self.assertEqual(cu.devices, self.devices_dir)
-        self.assertEqual(cu.interval, 1)
-        self.assertEqual(cu.concurrency, 2)
-        self.assertEqual(cu.node_timeout, 5.5)
-        self.assertTrue(cu.get_container_ring() is not None)
+        self.assertTrue(hasattr(ou, 'logger'))
+        self.assertTrue(ou.logger is not None)
+        self.assertEqual(ou.devices, self.devices_dir)
+        self.assertEqual(ou.interval, 1)
+        self.assertEqual(ou.concurrency, 2)
+        self.assertEqual(ou.node_timeout, 5.5)
+        self.assertTrue(ou.get_container_ring() is not None)
 
     @mock.patch('os.listdir')
     def test_listdir_with_exception(self, mock_listdir):
@@ -174,15 +174,15 @@ class TestObjectUpdater(unittest.TestCase):
                     seen.add((update_path, int(policy)))
                     os.unlink(update_path)
 
-            cu = MockObjectUpdater({
+            ou = MockObjectUpdater({
                 'devices': self.devices_dir,
                 'mount_check': 'false',
                 'swift_dir': self.testdir,
                 'interval': '1',
                 'concurrency': '1',
                 'node_timeout': '5'})
-            cu.logger = mock_logger = mock.MagicMock()
-            cu.object_sweep(self.sda1)
+            ou.logger = mock_logger = mock.MagicMock()
+            ou.object_sweep(self.sda1)
             self.assertEqual(mock_logger.warning.call_count, warn)
             self.assertTrue(
                 os.path.exists(os.path.join(self.sda1, 'not_a_dir')))
@@ -210,22 +210,22 @@ class TestObjectUpdater(unittest.TestCase):
     @mock.patch.object(object_updater, 'ismount')
     def test_run_once_with_disk_unmounted(self, mock_ismount):
         mock_ismount.return_value = False
-        cu = object_updater.ObjectUpdater({
+        ou = object_updater.ObjectUpdater({
             'devices': self.devices_dir,
             'mount_check': 'false',
             'swift_dir': self.testdir,
             'interval': '1',
             'concurrency': '1',
             'node_timeout': '15'})
-        cu.run_once()
+        ou.run_once()
         async_dir = os.path.join(self.sda1, get_async_dir(POLICIES[0]))
         os.mkdir(async_dir)
-        cu.run_once()
+        ou.run_once()
         self.assertTrue(os.path.exists(async_dir))
         # mount_check == False means no call to ismount
         self.assertEqual([], mock_ismount.mock_calls)
 
-        cu = object_updater.ObjectUpdater({
+        ou = object_updater.ObjectUpdater({
             'devices': self.devices_dir,
             'mount_check': 'TrUe',
             'swift_dir': self.testdir,
@@ -235,34 +235,34 @@ class TestObjectUpdater(unittest.TestCase):
         odd_dir = os.path.join(async_dir, 'not really supposed '
                                'to be here')
         os.mkdir(odd_dir)
-        cu.run_once()
+        ou.run_once()
         self.assertTrue(os.path.exists(async_dir))
         self.assertTrue(os.path.exists(odd_dir))  # skipped - not mounted!
         # mount_check == True means ismount was checked
         self.assertEqual([
             mock.call(self.sda1),
         ], mock_ismount.mock_calls)
-        self.assertEqual(cu.logger.get_increment_counts(), {'errors': 1})
+        self.assertEqual(ou.logger.get_increment_counts(), {'errors': 1})
 
     @mock.patch.object(object_updater, 'ismount')
     def test_run_once(self, mock_ismount):
         mock_ismount.return_value = True
-        cu = object_updater.ObjectUpdater({
+        ou = object_updater.ObjectUpdater({
             'devices': self.devices_dir,
             'mount_check': 'false',
             'swift_dir': self.testdir,
             'interval': '1',
             'concurrency': '1',
             'node_timeout': '15'}, logger=self.logger)
-        cu.run_once()
+        ou.run_once()
         async_dir = os.path.join(self.sda1, get_async_dir(POLICIES[0]))
         os.mkdir(async_dir)
-        cu.run_once()
+        ou.run_once()
         self.assertTrue(os.path.exists(async_dir))
         # mount_check == False means no call to ismount
         self.assertEqual([], mock_ismount.mock_calls)
 
-        cu = object_updater.ObjectUpdater({
+        ou = object_updater.ObjectUpdater({
             'devices': self.devices_dir,
             'mount_check': 'TrUe',
             'swift_dir': self.testdir,
@@ -272,7 +272,7 @@ class TestObjectUpdater(unittest.TestCase):
         odd_dir = os.path.join(async_dir, 'not really supposed '
                                'to be here')
         os.mkdir(odd_dir)
-        cu.run_once()
+        ou.run_once()
         self.assertTrue(os.path.exists(async_dir))
         self.assertTrue(not os.path.exists(odd_dir))
         # mount_check == True means ismount was checked
@@ -297,14 +297,14 @@ class TestObjectUpdater(unittest.TestCase):
                                  'X-Container-Timestamp':
                                  normalize_timestamp(0)}},
                             async_pending)
-        cu.run_once()
+        ou.run_once()
         self.assertTrue(not os.path.exists(older_op_path))
         self.assertTrue(os.path.exists(op_path))
-        self.assertEqual(cu.logger.get_increment_counts(),
+        self.assertEqual(ou.logger.get_increment_counts(),
                          {'failures': 1, 'unlinks': 1})
         self.assertIsNone(pickle.load(open(op_path)).get('successes'))
 
-        bindsock = listen(('127.0.0.1', 0))
+        bindsock = listen_zero()
 
         def accepter(sock, return_code):
             try:
@@ -330,14 +330,13 @@ class TestObjectUpdater(unittest.TestCase):
             return None
 
         def accept(return_codes):
-            codes = iter(return_codes)
             try:
                 events = []
-                for x in range(len(return_codes)):
+                for code in return_codes:
                     with Timeout(3):
                         sock, addr = bindsock.accept()
                         events.append(
-                            spawn(accepter, sock, next(codes)))
+                            spawn(accepter, sock, code))
                 for event in events:
                     err = event.wait()
                     if err:
@@ -347,41 +346,41 @@ class TestObjectUpdater(unittest.TestCase):
             return None
 
         event = spawn(accept, [201, 500, 500])
-        for dev in cu.get_container_ring().devs:
+        for dev in ou.get_container_ring().devs:
             if dev is not None:
                 dev['port'] = bindsock.getsockname()[1]
 
-        cu.logger._clear()
-        cu.run_once()
+        ou.logger._clear()
+        ou.run_once()
         err = event.wait()
         if err:
             raise err
         self.assertTrue(os.path.exists(op_path))
-        self.assertEqual(cu.logger.get_increment_counts(),
+        self.assertEqual(ou.logger.get_increment_counts(),
                          {'failures': 1})
         self.assertEqual([0],
                          pickle.load(open(op_path)).get('successes'))
 
-        event = spawn(accept, [404, 500])
-        cu.logger._clear()
-        cu.run_once()
+        event = spawn(accept, [404, 201])
+        ou.logger._clear()
+        ou.run_once()
         err = event.wait()
         if err:
             raise err
         self.assertTrue(os.path.exists(op_path))
-        self.assertEqual(cu.logger.get_increment_counts(),
+        self.assertEqual(ou.logger.get_increment_counts(),
                          {'failures': 1})
-        self.assertEqual([0, 1],
+        self.assertEqual([0, 2],
                          pickle.load(open(op_path)).get('successes'))
 
         event = spawn(accept, [201])
-        cu.logger._clear()
-        cu.run_once()
+        ou.logger._clear()
+        ou.run_once()
         err = event.wait()
         if err:
             raise err
         self.assertTrue(not os.path.exists(op_path))
-        self.assertEqual(cu.logger.get_increment_counts(),
+        self.assertEqual(ou.logger.get_increment_counts(),
                          {'unlinks': 1, 'successes': 1})
 
     def test_obj_put_legacy_updates(self):
@@ -435,9 +434,10 @@ class TestObjectUpdater(unittest.TestCase):
                               'async_pendings': 1})
 
     def test_obj_put_async_updates(self):
-        ts = (normalize_timestamp(t) for t in
-              itertools.count(int(time())))
-        policy = random.choice(list(POLICIES))
+        ts_iter = make_timestamp_iter()
+        policies = list(POLICIES)
+        random.shuffle(policies)
+
         # setup updater
         conf = {
             'devices': self.devices_dir,
@@ -445,46 +445,78 @@ class TestObjectUpdater(unittest.TestCase):
             'swift_dir': self.testdir,
         }
         daemon = object_updater.ObjectUpdater(conf, logger=self.logger)
-        async_dir = os.path.join(self.sda1, get_async_dir(policy))
+        async_dir = os.path.join(self.sda1, get_async_dir(policies[0]))
         os.mkdir(async_dir)
 
-        # write an async
-        dfmanager = DiskFileManager(conf, daemon.logger)
-        account, container, obj = 'a', 'c', 'o'
-        op = 'PUT'
-        headers_out = HeaderKeyDict({
+        def do_test(headers_out, expected):
+            # write an async
+            dfmanager = DiskFileManager(conf, daemon.logger)
+            account, container, obj = 'a', 'c', 'o'
+            op = 'PUT'
+            data = {'op': op, 'account': account, 'container': container,
+                    'obj': obj, 'headers': headers_out}
+            dfmanager.pickle_async_update(self.sda1, account, container, obj,
+                                          data, next(ts_iter), policies[0])
+
+            request_log = []
+
+            def capture(*args, **kwargs):
+                request_log.append((args, kwargs))
+
+            # run once
+            fake_status_codes = [
+                200,  # object update success
+                200,  # object update success
+                200,  # object update conflict
+            ]
+            with mocked_http_conn(*fake_status_codes, give_connect=capture):
+                daemon.run_once()
+            self.assertEqual(len(fake_status_codes), len(request_log))
+            for request_args, request_kwargs in request_log:
+                ip, part, method, path, headers, qs, ssl = request_args
+                self.assertEqual(method, 'PUT')
+                self.assertDictEqual(expected, headers)
+            self.assertEqual(
+                daemon.logger.get_increment_counts(),
+                {'successes': 1, 'unlinks': 1, 'async_pendings': 1})
+            self.assertFalse(os.listdir(async_dir))
+            daemon.logger.clear()
+
+        ts = next(ts_iter)
+        # use a dict rather than HeaderKeyDict so we can vary the case of the
+        # pickled headers
+        headers_out = {
             'x-size': 0,
             'x-content-type': 'text/plain',
             'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
-            'x-timestamp': next(ts),
-            'X-Backend-Storage-Policy-Index': int(policy),
-        })
-        data = {'op': op, 'account': account, 'container': container,
-                'obj': obj, 'headers': headers_out}
-        dfmanager.pickle_async_update(self.sda1, account, container, obj,
-                                      data, next(ts), policy)
+            'x-timestamp': ts.normal,
+            'X-Backend-Storage-Policy-Index': int(policies[0]),
+            'User-Agent': 'object-server %s' % os.getpid()
+        }
+        expected = {
+            'X-Size': '0',
+            'X-Content-Type': 'text/plain',
+            'X-Etag': 'd41d8cd98f00b204e9800998ecf8427e',
+            'X-Timestamp': ts.normal,
+            'X-Backend-Storage-Policy-Index': str(int(policies[0])),
+            'User-Agent': 'object-updater %s' % os.getpid()
+        }
+        do_test(headers_out, expected)
 
-        request_log = []
+        # updater should add policy header if missing
+        headers_out['X-Backend-Storage-Policy-Index'] = None
+        do_test(headers_out, expected)
 
-        def capture(*args, **kwargs):
-            request_log.append((args, kwargs))
+        # updater should not overwrite a mismatched policy header
+        headers_out['X-Backend-Storage-Policy-Index'] = int(policies[1])
+        expected['X-Backend-Storage-Policy-Index'] = str(int(policies[1]))
+        do_test(headers_out, expected)
 
-        # run once
-        fake_status_codes = [
-            200,  # object update success
-            200,  # object update success
-            200,  # object update conflict
-        ]
-        with mocked_http_conn(*fake_status_codes, give_connect=capture):
-            daemon.run_once()
-        self.assertEqual(len(fake_status_codes), len(request_log))
-        for request_args, request_kwargs in request_log:
-            ip, part, method, path, headers, qs, ssl = request_args
-            self.assertEqual(method, 'PUT')
-            self.assertEqual(headers['X-Backend-Storage-Policy-Index'],
-                             str(int(policy)))
-        self.assertEqual(daemon.logger.get_increment_counts(),
-                         {'successes': 1, 'unlinks': 1, 'async_pendings': 1})
+        # check for case insensitivity
+        headers_out['user-agent'] = headers_out.pop('User-Agent')
+        headers_out['x-backend-storage-policy-index'] = headers_out.pop(
+            'X-Backend-Storage-Policy-Index')
+        do_test(headers_out, expected)
 
 
 if __name__ == '__main__':

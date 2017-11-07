@@ -30,6 +30,7 @@ import itertools
 from contextlib import contextmanager
 import random
 import mock
+import base64
 
 from swift.account.backend import AccountBroker
 from swift.common.utils import Timestamp
@@ -801,13 +802,13 @@ class TestAccountBroker(unittest.TestCase):
         broker = AccountBroker(broker_path, account='real')
         broker.initialize(Timestamp(1).internal)
         with open(broker.pending_file, 'a+b') as pending:
-            pending.write(':')
-            pending.write(pickle.dumps(
+            pending.write(b':')
+            pending.write(base64.b64encode(pickle.dumps(
                 # name, put_timestamp, delete_timestamp, object_count,
                 # bytes_used, deleted
                 ('oldcon', Timestamp(200).internal,
                  Timestamp(0).internal,
-                 896, 9216695, 0)).encode('base64'))
+                 896, 9216695, 0))))
 
         broker._commit_puts()
         with broker.get() as conn:
@@ -830,13 +831,13 @@ class TestAccountBroker(unittest.TestCase):
                                stale_reads_ok=True)
         broker.initialize(Timestamp(1).internal)
         with open(broker.pending_file, 'a+b') as pending:
-            pending.write(':')
-            pending.write(pickle.dumps(
+            pending.write(b':')
+            pending.write(base64.b64encode(pickle.dumps(
                 # name, put_timestamp, delete_timestamp, object_count,
                 # bytes_used, deleted
                 ('oldcon', Timestamp(200).internal,
                  Timestamp(0).internal,
-                 896, 9216695, 0)).encode('base64'))
+                 896, 9216695, 0))))
 
         broker._commit_puts = mock_commit_puts
         broker.get_info()
@@ -852,13 +853,13 @@ class TestAccountBroker(unittest.TestCase):
                                stale_reads_ok=False)
         broker.initialize(Timestamp(1).internal)
         with open(broker.pending_file, 'a+b') as pending:
-            pending.write(':')
-            pending.write(pickle.dumps(
+            pending.write(b':')
+            pending.write(base64.b64encode(pickle.dumps(
                 # name, put_timestamp, delete_timestamp, object_count,
                 # bytes_used, deleted
                 ('oldcon', Timestamp(200).internal,
                  Timestamp(0).internal,
-                 896, 9216695, 0)).encode('base64'))
+                 896, 9216695, 0))))
 
         broker._commit_puts = mock_commit_puts
 
@@ -1224,18 +1225,19 @@ class TestAccountBrokerBeforeSPI(TestAccountBroker):
                           'from container table!')
 
         # manually insert an existing row to avoid migration
+        timestamp = Timestamp(time()).internal
         with broker.get() as conn:
             conn.execute('''
                 INSERT INTO container (name, put_timestamp,
                     delete_timestamp, object_count, bytes_used,
                     deleted)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', ('test_name', Timestamp(time()).internal, 0, 1, 2, 0))
+            ''', ('test_name', timestamp, 0, 1, 2, 0))
             conn.commit()
 
         # make sure we can iter containers without the migration
         for c in broker.list_containers_iter(1, None, None, None, None):
-            self.assertEqual(c, ('test_name', 1, 2, 0))
+            self.assertEqual(c, ('test_name', 1, 2, timestamp, 0))
 
         # stats table is mysteriously empty...
         stats = broker.get_policy_stats()
@@ -1362,6 +1364,7 @@ class TestAccountBrokerBeforeSPI(TestAccountBroker):
         new_broker = AccountBroker(os.path.join(tempdir, 'new_account.db'),
                                    account='a')
         new_broker.initialize(next(ts).internal)
+        timestamp = next(ts).internal
 
         # manually insert an existing row to avoid migration for old database
         with old_broker.get() as conn:
@@ -1370,7 +1373,7 @@ class TestAccountBrokerBeforeSPI(TestAccountBroker):
                     delete_timestamp, object_count, bytes_used,
                     deleted)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', ('test_name', next(ts).internal, 0, 1, 2, 0))
+            ''', ('test_name', timestamp, 0, 1, 2, 0))
             conn.commit()
 
         # get replication info and rows form old database
@@ -1383,7 +1386,7 @@ class TestAccountBrokerBeforeSPI(TestAccountBroker):
         # make sure "test_name" container in new database
         self.assertEqual(new_broker.get_info()['container_count'], 1)
         for c in new_broker.list_containers_iter(1, None, None, None, None):
-            self.assertEqual(c, ('test_name', 1, 2, 0))
+            self.assertEqual(c, ('test_name', 1, 2, timestamp, 0))
 
         # full migration successful
         with new_broker.get() as conn:

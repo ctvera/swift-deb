@@ -117,29 +117,26 @@ Object Post as Copy
 -------------------
 Historically, this has been a feature (and a configurable option with default
 set to True) in proxy server configuration. This has been moved to server side
-copy middleware.
+copy middleware and the default changed to False.
 
-When ``object_post_as_copy`` is set to ``true`` (default value), an incoming
-POST request is morphed into a COPY request where source and destination
-objects are same.
+When ``object_post_as_copy`` is set to ``true``, an incoming POST request is
+morphed into a COPY request where source and destination objects are same.
 
 This feature was necessary because of a previous behavior where POSTS would
 update the metadata on the object but not on the container. As a result,
 features like container sync would not work correctly. This is no longer the
-case and the plan is to deprecate this option. It is being kept now for
-backwards compatibility. At first chance, set ``object_post_as_copy`` to
-``false``.
+case and this option is now deprecated. It will be removed in a future release.
 """
 
 import os
-from ConfigParser import ConfigParser, NoSectionError, NoOptionError
+from six.moves.configparser import ConfigParser, NoSectionError, NoOptionError
 from six.moves.urllib.parse import quote, unquote
 
 from swift.common import utils
 from swift.common.utils import get_logger, \
     config_true_value, FileLikeIter, read_conf_dir, close_if_possible
 from swift.common.swob import Request, HTTPPreconditionFailed, \
-    HTTPRequestEntityTooLarge, HTTPBadRequest
+    HTTPRequestEntityTooLarge, HTTPBadRequest, HTTPException
 from swift.common.http import HTTP_MULTIPLE_CHOICES, HTTP_CREATED, \
     is_success, HTTP_OK
 from swift.common.constraints import check_account_format, MAX_FILE_SIZE
@@ -277,7 +274,13 @@ class ServerSideCopyMiddleware(object):
         # problems during upgrade.
         self._load_object_post_as_copy_conf(conf)
         self.object_post_as_copy = \
-            config_true_value(conf.get('object_post_as_copy', 'true'))
+            config_true_value(conf.get('object_post_as_copy', 'false'))
+        if self.object_post_as_copy:
+            msg = ('object_post_as_copy=true is deprecated; remove all '
+                   'references to it from %s to disable this warning. This '
+                   'option will be ignored in a future release' % conf.get(
+                       '__file__', 'proxy-server.conf'))
+            self.logger.warning(msg)
 
     def _load_object_post_as_copy_conf(self, conf):
         if ('object_post_as_copy' in conf or '__file__' not in conf):
@@ -318,21 +321,25 @@ class ServerSideCopyMiddleware(object):
         self.container_name = container
         self.object_name = obj
 
-        # Save off original request method (COPY/POST) in case it gets mutated
-        # into PUT during handling. This way logging can display the method
-        # the client actually sent.
-        req.environ['swift.orig_req_method'] = req.method
+        try:
+            # In some cases, save off original request method since it gets
+            # mutated into PUT during handling. This way logging can display
+            # the method the client actually sent.
+            if req.method == 'PUT' and req.headers.get('X-Copy-From'):
+                return self.handle_PUT(req, start_response)
+            elif req.method == 'COPY':
+                req.environ['swift.orig_req_method'] = req.method
+                return self.handle_COPY(req, start_response)
+            elif req.method == 'POST' and self.object_post_as_copy:
+                req.environ['swift.orig_req_method'] = req.method
+                return self.handle_object_post_as_copy(req, start_response)
+            elif req.method == 'OPTIONS':
+                # Does not interfere with OPTIONS response from
+                # (account,container) servers and /info response.
+                return self.handle_OPTIONS(req, start_response)
 
-        if req.method == 'PUT' and req.headers.get('X-Copy-From'):
-            return self.handle_PUT(req, start_response)
-        elif req.method == 'COPY':
-            return self.handle_COPY(req, start_response)
-        elif req.method == 'POST' and self.object_post_as_copy:
-            return self.handle_object_post_as_copy(req, start_response)
-        elif req.method == 'OPTIONS':
-            # Does not interfere with OPTIONS response from (account,container)
-            # servers and /info response.
-            return self.handle_OPTIONS(req, start_response)
+        except HTTPException as e:
+            return e(req.environ, start_response)
 
         return self.app(env, start_response)
 
@@ -455,10 +462,33 @@ class ServerSideCopyMiddleware(object):
             close_if_possible(source_resp.app_iter)
             return source_resp(source_resp.environ, start_response)
 
-        # Create a new Request object based on the original req instance.
-        # This will preserve env and headers.
-        sink_req = Request.blank(req.path_info,
-                                 environ=req.environ, headers=req.headers)
+        # Create a new Request object based on the original request instance.
+        # This will preserve original request environ including headers.
+        sink_req = Request.blank(req.path_info, environ=req.environ)
+
+        def is_object_sysmeta(k):
+            return is_sys_meta('object', k)
+
+        if 'swift.post_as_copy' in sink_req.environ:
+            # Post-as-copy: ignore new sysmeta, copy existing sysmeta
+            remove_items(sink_req.headers, is_object_sysmeta)
+            copy_header_subset(source_resp, sink_req, is_object_sysmeta)
+        elif config_true_value(req.headers.get('x-fresh-metadata', 'false')):
+            # x-fresh-metadata only applies to copy, not post-as-copy: ignore
+            # existing user metadata, update existing sysmeta with new
+            copy_header_subset(source_resp, sink_req, is_object_sysmeta)
+            copy_header_subset(req, sink_req, is_object_sysmeta)
+        else:
+            # First copy existing sysmeta, user meta and other headers from the
+            # source to the sink, apart from headers that are conditionally
+            # copied below and timestamps.
+            exclude_headers = ('x-static-large-object', 'x-object-manifest',
+                               'etag', 'content-type', 'x-timestamp',
+                               'x-backend-timestamp')
+            copy_header_subset(source_resp, sink_req,
+                               lambda k: k.lower() not in exclude_headers)
+            # now update with original req headers
+            sink_req.headers.update(req.headers)
 
         params = sink_req.params
         if params.get('multipart-manifest') == 'get':
@@ -466,11 +496,14 @@ class ServerSideCopyMiddleware(object):
                 params['multipart-manifest'] = 'put'
             if 'X-Object-Manifest' in source_resp.headers:
                 del params['multipart-manifest']
-                sink_req.headers['X-Object-Manifest'] = \
-                    source_resp.headers['X-Object-Manifest']
+                if 'swift.post_as_copy' not in sink_req.environ:
+                    sink_req.headers['X-Object-Manifest'] = \
+                        source_resp.headers['X-Object-Manifest']
             sink_req.params = params
 
-        # Set data source, content length and etag for the PUT request
+        # Set swift.source, data source, content length and etag
+        # for the PUT request
+        sink_req.environ['swift.source'] = 'SSC'
         sink_req.environ['wsgi.input'] = FileLikeIter(source_resp.app_iter)
         sink_req.content_length = source_resp.content_length
         if (source_resp.status_int == HTTP_OK and
@@ -489,31 +522,18 @@ class ServerSideCopyMiddleware(object):
         else:
             # since we're not copying the source etag, make sure that any
             # container update override values are not copied.
-            remove_items(source_resp.headers, lambda k: k.startswith(
+            remove_items(sink_req.headers, lambda k: k.startswith(
                 'X-Object-Sysmeta-Container-Update-Override-'))
 
         # We no longer need these headers
         sink_req.headers.pop('X-Copy-From', None)
         sink_req.headers.pop('X-Copy-From-Account', None)
+
         # If the copy request does not explicitly override content-type,
         # use the one present in the source object.
         if not req.headers.get('content-type'):
             sink_req.headers['Content-Type'] = \
                 source_resp.headers['Content-Type']
-
-        fresh_meta_flag = config_true_value(
-            sink_req.headers.get('x-fresh-metadata', 'false'))
-
-        if fresh_meta_flag or 'swift.post_as_copy' in sink_req.environ:
-            # Post-as-copy: ignore new sysmeta, copy existing sysmeta
-            condition = lambda k: is_sys_meta('object', k)
-            remove_items(sink_req.headers, condition)
-            copy_header_subset(source_resp, sink_req, condition)
-        else:
-            # Copy/update existing sysmeta, transient-sysmeta and user meta
-            _copy_headers(source_resp.headers, sink_req.headers)
-            # Copy/update new metadata provided in request if any
-            _copy_headers(req.headers, sink_req.headers)
 
         # Create response headers for PUT response
         resp_headers = self._create_response_headers(source_path,

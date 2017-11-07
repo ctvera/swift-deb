@@ -122,7 +122,7 @@ class TestContainerController(TestRingBase):
             resp = controller.HEAD(req)
         self.assertEqual(2, resp.status_int // 100)
         for key in owner_headers:
-            self.assertTrue(key not in resp.headers)
+            self.assertNotIn(key, resp.headers)
 
         req = Request.blank('/v1/a/c', environ={'swift_owner': True})
         with mock.patch('swift.proxy.controllers.base.http_connect',
@@ -130,7 +130,7 @@ class TestContainerController(TestRingBase):
             resp = controller.HEAD(req)
         self.assertEqual(2, resp.status_int // 100)
         for key in owner_headers:
-            self.assertTrue(key in resp.headers)
+            self.assertIn(key, resp.headers)
 
     def test_sys_meta_headers_PUT(self):
         # check that headers in sys meta namespace make it through
@@ -150,9 +150,9 @@ class TestContainerController(TestRingBase):
                         fake_http_connect(200, 200, give_connect=callback)):
             controller.PUT(req)
         self.assertEqual(context['method'], 'PUT')
-        self.assertTrue(sys_meta_key in context['headers'])
+        self.assertIn(sys_meta_key, context['headers'])
         self.assertEqual(context['headers'][sys_meta_key], 'foo')
-        self.assertTrue(user_meta_key in context['headers'])
+        self.assertIn(user_meta_key, context['headers'])
         self.assertEqual(context['headers'][user_meta_key], 'bar')
         self.assertNotEqual(context['headers']['x-timestamp'], '1.0')
 
@@ -173,9 +173,9 @@ class TestContainerController(TestRingBase):
                         fake_http_connect(200, 200, give_connect=callback)):
             controller.POST(req)
         self.assertEqual(context['method'], 'POST')
-        self.assertTrue(sys_meta_key in context['headers'])
+        self.assertIn(sys_meta_key, context['headers'])
         self.assertEqual(context['headers'][sys_meta_key], 'foo')
-        self.assertTrue(user_meta_key in context['headers'])
+        self.assertIn(user_meta_key, context['headers'])
         self.assertEqual(context['headers'][user_meta_key], 'bar')
         self.assertNotEqual(context['headers']['x-timestamp'], '1.0')
 
@@ -224,6 +224,40 @@ class TestContainerController(TestRingBase):
             self.assertEqual(node_error_count(
                 self.app, self.container_ring.devs[2]),
                 self.app.error_suppression_limit + 1)
+
+    def test_response_codes_for_GET(self):
+        nodes = self.app.container_ring.replicas
+        handoffs = self.app.request_node_count(nodes) - nodes
+        GET_TEST_CASES = [
+            ([], 503),
+            ([200], 200),
+            ([404, 200], 200),
+            ([404] * nodes + [200], 200),
+            ([Timeout()] * nodes + [404] * handoffs, 404),
+            ([Timeout()] * (nodes + handoffs), 503),
+            ([Timeout()] * (nodes + handoffs - 1) + [404], 404),
+            ([503, 200], 200),
+            ([507, 200], 200),
+        ]
+        failures = []
+        for case, expected in GET_TEST_CASES:
+            try:
+                with mocked_http_conn(*case):
+                    req = Request.blank('/v1/a/c')
+                    resp = req.get_response(self.app)
+                    try:
+                        self.assertEqual(resp.status_int, expected)
+                    except AssertionError:
+                        msg = '%r => %s (expected %s)' % (
+                            case, resp.status_int, expected)
+                        failures.append(msg)
+            except AssertionError as e:
+                # left over status failure
+                msg = '%r => %s' % (case, e)
+                failures.append(msg)
+        if failures:
+            self.fail('Some requests did not have expected response:\n' +
+                      '\n'.join(failures))
 
     def test_response_code_for_PUT(self):
         PUT_TEST_CASES = [

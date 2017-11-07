@@ -19,10 +19,11 @@ from hashlib import md5
 from six.moves import urllib
 
 from swift.common.utils import hash_path, storage_directory, \
-    Timestamp
+    Timestamp, is_valid_ipv6
 from swift.common.ring import Ring
 from swift.common.request_helpers import is_sys_meta, is_user_meta, \
-    strip_sys_meta_prefix, strip_user_meta_prefix
+    strip_sys_meta_prefix, strip_user_meta_prefix, \
+    is_object_transient_sysmeta
 from swift.account.backend import AccountBroker, DATADIR as ABDATADIR
 from swift.container.backend import ContainerBroker, DATADIR as CBDATADIR
 from swift.obj.diskfile import get_data_dir, read_metadata, DATADIR_BASE, \
@@ -35,6 +36,64 @@ class InfoSystemExit(Exception):
     Indicates to the caller that a sys.exit(1) should be performed.
     """
     pass
+
+
+def parse_get_node_args(options, args):
+    """
+    Parse the get_nodes commandline args
+
+    :returns: a tuple, (ring_path, args)
+    """
+    ring_path = None
+
+    if options.policy_name:
+        if POLICIES.get_by_name(options.policy_name) is None:
+            raise InfoSystemExit('No policy named %r' % options.policy_name)
+    elif args and args[0].endswith('ring.gz'):
+        if os.path.exists(args[0]):
+            ring_path = args.pop(0)
+        else:
+            raise InfoSystemExit('Ring file does not exist')
+
+    if len(args) == 1:
+        args = args[0].strip('/').split('/', 2)
+
+    if not ring_path and not options.policy_name:
+        raise InfoSystemExit('Need to specify policy_name or <ring.gz>')
+
+    if not (args or options.partition):
+        raise InfoSystemExit('No target specified')
+
+    if len(args) > 3:
+        raise InfoSystemExit('Invalid arguments')
+
+    return ring_path, args
+
+
+def curl_head_command(ip, port, device, part, target, policy_index):
+    """
+    Provide a string that is a well formatted curl command to HEAD an object
+    on a storage node.
+
+    :param ip: the ip of the node
+    :param port: the port of the node
+    :param device: the device of the node
+    :param target: the path of the target resource
+    :param policy_index: the policy_index of the target resource (can be None)
+
+    :returns: a string, a well formatted curl command
+    """
+    if is_valid_ipv6(ip):
+        formatted_ip = '[%s]' % ip
+    else:
+        formatted_ip = ip
+
+    cmd = 'curl -g -I -XHEAD "http://%s:%s/%s/%s/%s"' % (
+        formatted_ip, port, device, part, urllib.parse.quote(target))
+    if policy_index is not None:
+        cmd += ' -H "%s: %s"' % ('X-Backend-Storage-Policy-Index',
+                                 policy_index)
+    return cmd
 
 
 def print_ring_locations(ring, datadir, account, container=None, obj=None,
@@ -99,20 +158,12 @@ def print_ring_locations(ring, datadir, account, container=None, obj=None,
     print("\n")
 
     for node in primary_nodes:
-        cmd = 'curl -I -XHEAD "http://%s:%s/%s/%s/%s"' \
-            % (node['ip'], node['port'], node['device'], part,
-               urllib.parse.quote(target))
-        if policy_index is not None:
-            cmd += ' -H "%s: %s"' % ('X-Backend-Storage-Policy-Index',
-                                     policy_index)
+        cmd = curl_head_command(node['ip'], node['port'], node['device'],
+                                part, target, policy_index)
         print(cmd)
     for node in handoff_nodes:
-        cmd = 'curl -I -XHEAD "http://%s:%s/%s/%s/%s"' \
-            % (node['ip'], node['port'], node['device'], part,
-               urllib.parse.quote(target))
-        if policy_index is not None:
-            cmd += ' -H "%s: %s"' % ('X-Backend-Storage-Policy-Index',
-                                     policy_index)
+        cmd = curl_head_command(node['ip'], node['port'], node['device'],
+                                part, target, policy_index)
         cmd += ' # [Handoff]'
         print(cmd)
 
@@ -256,6 +307,7 @@ def print_obj_metadata(metadata):
     """
     user_metadata = {}
     sys_metadata = {}
+    transient_sys_metadata = {}
     other_metadata = {}
 
     if not metadata:
@@ -292,6 +344,8 @@ def print_obj_metadata(metadata):
             user_metadata[key] = value
         elif is_sys_meta('Object', key):
             sys_metadata[key] = value
+        elif is_object_transient_sysmeta(key):
+            transient_sys_metadata[key] = value
         else:
             other_metadata[key] = value
 
@@ -304,6 +358,7 @@ def print_obj_metadata(metadata):
             print('  No metadata found')
 
     print_metadata('System Metadata:', sys_metadata)
+    print_metadata('Transient System Metadata:', transient_sys_metadata)
     print_metadata('User Metadata:', user_metadata)
     print_metadata('Other Metadata:', other_metadata)
 

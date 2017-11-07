@@ -19,8 +19,7 @@ from swift.common import ring
 from swift.common.ring.utils import (tiers_for_dev, build_tier_tree,
                                      validate_and_normalize_ip,
                                      validate_and_normalize_address,
-                                     is_valid_ip, is_valid_ipv4,
-                                     is_valid_ipv6, is_valid_hostname,
+                                     is_valid_hostname,
                                      is_local_device, parse_search_value,
                                      parse_search_values_from_opts,
                                      parse_change_values_from_opts,
@@ -101,78 +100,6 @@ class TestUtils(unittest.TestCase):
                          set([(1, 2, '192.168.2.2', 9),
                               (1, 2, '192.168.2.2', 10),
                               (1, 2, '192.168.2.2', 11)]))
-
-    def test_is_valid_ip(self):
-        self.assertTrue(is_valid_ip("127.0.0.1"))
-        self.assertTrue(is_valid_ip("10.0.0.1"))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80:0:0:0:204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80::204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80:0:0:0:0204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80::204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "fe80::"
-        self.assertTrue(is_valid_ip(ipv6))
-        ipv6 = "::1"
-        self.assertTrue(is_valid_ip(ipv6))
-        not_ipv6 = "3ffe:0b00:0000:0001:0000:0000:000a"
-        self.assertFalse(is_valid_ip(not_ipv6))
-        not_ipv6 = "1:2:3:4:5:6::7:8"
-        self.assertFalse(is_valid_ip(not_ipv6))
-
-    def test_is_valid_ipv4(self):
-        self.assertTrue(is_valid_ipv4("127.0.0.1"))
-        self.assertTrue(is_valid_ipv4("10.0.0.1"))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:fe9d:f156"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80:0:0:0:204:61ff:fe9d:f156"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80::204:61ff:fe9d:f156"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:254.157.241.86"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80:0:0:0:0204:61ff:254.157.241.86"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80::204:61ff:254.157.241.86"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "fe80::"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        ipv6 = "::1"
-        self.assertFalse(is_valid_ipv4(ipv6))
-        not_ipv6 = "3ffe:0b00:0000:0001:0000:0000:000a"
-        self.assertFalse(is_valid_ipv4(not_ipv6))
-        not_ipv6 = "1:2:3:4:5:6::7:8"
-        self.assertFalse(is_valid_ipv4(not_ipv6))
-
-    def test_is_valid_ipv6(self):
-        self.assertFalse(is_valid_ipv6("127.0.0.1"))
-        self.assertFalse(is_valid_ipv6("10.0.0.1"))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80:0:0:0:204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80::204:61ff:fe9d:f156"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80:0000:0000:0000:0204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80:0:0:0:0204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80::204:61ff:254.157.241.86"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "fe80::"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        ipv6 = "::1"
-        self.assertTrue(is_valid_ipv6(ipv6))
-        not_ipv6 = "3ffe:0b00:0000:0001:0000:0000:000a"
-        self.assertFalse(is_valid_ipv6(not_ipv6))
-        not_ipv6 = "1:2:3:4:5:6::7:8"
-        self.assertFalse(is_valid_ipv6(not_ipv6))
 
     def test_is_valid_hostname(self):
         self.assertTrue(is_valid_hostname("local"))
@@ -737,11 +664,18 @@ class TestUtils(unittest.TestCase):
                     'ip': '127.0.0.3', 'port': 10003, 'device': 'sdd1'})
 
         # when the biggest tier has the smallest devices things get ugly
+        # can't move all the part-replicas in one rebalance
         rb.rebalance(seed=100)
         report = dispersion_report(rb, verbose=True)
-        self.assertEqual(rb.dispersion, 70.3125)
+        self.assertEqual(rb.dispersion, 9.375)
+        self.assertEqual(report['worst_tier'], 'r1z1-127.0.0.1')
+        self.assertEqual(report['max_dispersion'], 7.18562874251497)
+        # do a sencond rebalance
+        rb.rebalance(seed=100)
+        report = dispersion_report(rb, verbose=True)
+        self.assertEqual(rb.dispersion, 50.0)
         self.assertEqual(report['worst_tier'], 'r1z0-127.0.0.3')
-        self.assertEqual(report['max_dispersion'], 88.23529411764706)
+        self.assertEqual(report['max_dispersion'], 50.0)
 
         # ... but overload can square it
         rb.set_overload(rb.get_required_overload())
