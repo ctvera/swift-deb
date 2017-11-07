@@ -1,3 +1,9 @@
+swift (2.13.1-1) unstable; urgency=medium
+
+  * New upstream version
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 07 Nov 2017 10:59:33 +0200
+
 swift (2.9.0-2) experimental; urgency=medium
 
   * Rebased on 2.7.0-10
