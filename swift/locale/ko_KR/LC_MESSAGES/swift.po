@@ -6,22 +6,21 @@
 # Mario Cho <hephaex@gmail.com>, 2014
 # Ying Chun Guo <daisy.ycguo@gmail.com>, 2015
 # Andreas Jaeger <jaegerandi@gmail.com>, 2016. #zanata
-# Eunseop Shin <kairos9603@gmail.com>, 2016. #zanata
-# SeongSoo Cho <nexusz99@gmail.com>, 2016. #zanata
+# youngwoo Kim <koain@naver.com>, 2017. #zanata
 msgid ""
 msgstr ""
-"Project-Id-Version: swift 2.10.1.dev16\n"
+"Project-Id-Version: swift 2.13.1.dev7\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2016-11-20 23:59+0000\n"
+"POT-Creation-Date: 2017-04-21 19:40+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"PO-Revision-Date: 2016-11-22 02:19+0000\n"
-"Last-Translator: SeongSoo Cho <nexusz99@gmail.com>\n"
+"PO-Revision-Date: 2017-04-25 03:39+0000\n"
+"Last-Translator: youngwoo Kim <koain@naver.com>\n"
 "Language: ko-KR\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.0\n"
-"X-Generator: Zanata 3.7.3\n"
+"X-Generator: Zanata 3.9.6\n"
 "Language-Team: Korean (South Korea)\n"
 
 msgid ""
@@ -52,33 +51,11 @@ msgstr "%(msg)s %(ip)s:%(port)s/%(device)s"
 
 #, python-format
 msgid ""
-"%(reconstructed)d/%(total)d (%(percentage).2f%%) partitions of %(device)d/"
-"%(dtotal)d (%(dpercentage).2f%%) devices reconstructed in %(time).2fs "
-"(%(rate).2f/sec, %(remaining)s remaining)"
-msgstr ""
-"%(device)d/%(dtotal)d (%(dpercentage).2f%%) 장치 중 %(reconstructed)d/"
-"%(total)d (%(percentage).2f%%)개의 파티션이 %(time).2fs (%(rate).2f/sec, "
-"%(remaining)s 남음)에 재구성됨"
-
-#, python-format
-msgid ""
 "%(replicated)d/%(total)d (%(percentage).2f%%) partitions replicated in "
 "%(time).2fs (%(rate).2f/sec, %(remaining)s remaining)"
 msgstr ""
 "%(replicated)d/%(total)d(%(percentage).2f%%)개 파티션이 %(time).2f초"
 "(%(rate).2f/초, %(remaining)s 남음) 안에 복제됨"
-
-#, python-format
-msgid "%(replication_ip)s/%(device)s responded as unmounted"
-msgstr "%(replication_ip)s/%(device)s 가 마운트되지 않았음"
-
-#, python-format
-msgid "%(server)s #%(number)d not running (%(conf)s)"
-msgstr "%(server)s #%(number)d이(가) 실행 중이지 않음. (%(conf)s)"
-
-#, python-format
-msgid "%(server)s (%(pid)s) appears to have stopped"
-msgstr "%(server)s (%(pid)s)이(가) 중지됨"
 
 #, python-format
 msgid "%(server)s running (%(pid)s - %(conf)s)"
@@ -726,6 +703,9 @@ msgstr "잠금 발견.. 활성 coros를 강제 종료합니다."
 msgid "Mapped %(given_domain)s to %(found_domain)s"
 msgstr "%(given_domain)s을(를) %(found_domain)s(으)로 맵핑함"
 
+msgid "More than one part in a single-part response?"
+msgstr "single-part에서 하나 이상의 응답 파트가 존재 합니까?"
+
 #, python-format
 msgid "Missing key for %r"
 msgstr "%r에 대한 키가 없음"
@@ -1079,10 +1059,6 @@ msgid "Unable to find %(section)s config section in %(conf)s"
 msgstr "%(section)s 구성 섹션을 %(conf)s에서 찾을 수 없음"
 
 #, python-format
-msgid "Unable to load internal client from config: %(conf)r (%(error)s)"
-msgstr "구성에서 내부 클라이언트를 로드할 수 없음: %(conf)r (%(error)s)"
-
-#, python-format
 msgid "Unable to locate %s in libc.  Leaving as a no-op."
 msgstr "libc에서 %s을(를) 찾을 수 없습니다. no-op로 남겨 둡니다."
 
@@ -1165,14 +1141,6 @@ msgid ""
 msgstr ""
 "경고: 프로세스 우선순위 스케줄링을 수정할 수 없습니다. 계속 바뀌지 않습니다! "
 "자세한 정보는 로그를 확인하십시오. "
-
-#, python-format
-msgid "Waited %(kill_wait)s seconds for %(server)s to die; giving up"
-msgstr "%(kill_wait)s초 동안 %(server)s의 종료를 대기함, 포기하는 중"
-
-#, python-format
-msgid "Waited %(kill_wait)s seconds for %(server)s to die; killing"
-msgstr "%(kill_wait)s초 동안 %(server)s을(를) 대기, 강제 종료 중"
 
 msgid "Warning: Cannot ratelimit without a memcached client"
 msgstr "경고: memcached 클라이언트 없이 전송률을 제한할 수 없음"

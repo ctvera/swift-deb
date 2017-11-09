@@ -35,6 +35,7 @@ from hashlib import md5
 import tempfile
 from collections import defaultdict
 from contextlib import contextmanager
+from textwrap import dedent
 
 from eventlet import sleep, spawn, wsgi, Timeout, tpool, greenthread
 from eventlet.green import httplib
@@ -63,6 +64,7 @@ from swift.common.storage_policy import (StoragePolicy, ECStoragePolicy,
                                          POLICIES, EC_POLICY)
 from swift.common.exceptions import DiskFileDeviceUnavailable, \
     DiskFileNoSpace, DiskFileQuarantined
+from swift.common.wsgi import init_request_processor
 
 
 def mock_time(*args, **kwargs):
@@ -134,6 +136,11 @@ class TestObjectController(unittest.TestCase):
     def _stage_tmp_dir(self, policy):
         mkdirs(os.path.join(self.testdir, 'sda1',
                             diskfile.get_tmp_dir(policy)))
+
+    def iter_policies(self):
+        for policy in POLICIES:
+            self.policy = policy
+            yield policy
 
     def check_all_api_methods(self, obj_name='o', alt_res=None):
         path = '/sda1/p/a/c/%s' % obj_name
@@ -1020,8 +1027,8 @@ class TestObjectController(unittest.TestCase):
         self.assertEqual((node, 99, 'PUT', '/a/c/o'),
                          mock_update.call_args_list[0][0][0:4])
         actual_headers = mock_update.call_args_list[0][0][4]
-        self.assertTrue(
-            actual_headers.pop('user-agent').startswith('object-updater'))
+        # User-Agent is updated.
+        expected_post_headers['User-Agent'] = 'object-updater %s' % os.getpid()
         self.assertDictEqual(expected_post_headers, actual_headers)
         self.assertFalse(
             os.listdir(os.path.join(
@@ -1077,6 +1084,13 @@ class TestObjectController(unittest.TestCase):
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 400)
 
+    def test_PUT_bad_timestamp(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': 'bad'})
+        resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 400)
+
     def test_PUT_no_content_type(self):
         req = Request.blank(
             '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
@@ -1129,10 +1143,9 @@ class TestObjectController(unittest.TestCase):
 
     def test_PUT_if_none_match_star(self):
         # First PUT should succeed
-        timestamp = normalize_timestamp(time())
         req = Request.blank(
             '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': timestamp,
+            headers={'X-Timestamp': next(self.ts).normal,
                      'Content-Length': '6',
                      'Content-Type': 'application/octet-stream',
                      'If-None-Match': '*'})
@@ -1140,16 +1153,31 @@ class TestObjectController(unittest.TestCase):
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 201)
         # File should already exist so it should fail
-        timestamp = normalize_timestamp(time())
         req = Request.blank(
             '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': timestamp,
+            headers={'X-Timestamp': next(self.ts).normal,
                      'Content-Length': '6',
                      'Content-Type': 'application/octet-stream',
                      'If-None-Match': '*'})
         req.body = 'VERIFY'
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 412)
+
+        req = Request.blank('/sda1/p/a/c/o',
+                            environ={'REQUEST_METHOD': 'DELETE'},
+                            headers={'X-Timestamp': next(self.ts).normal})
+        resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 204)
+
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': next(self.ts).normal,
+                     'Content-Length': '6',
+                     'Content-Type': 'application/octet-stream',
+                     'If-None-Match': '*'})
+        req.body = 'VERIFY'
+        resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 201)
 
     def test_PUT_if_none_match(self):
         # PUT with if-none-match set and nothing there should succeed
@@ -1174,6 +1202,53 @@ class TestObjectController(unittest.TestCase):
         req.body = 'VERIFY'
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 412)
+
+    def test_PUT_if_none_match_but_expired(self):
+        inital_put = next(self.ts)
+        put_before_expire = next(self.ts)
+        delete_at_timestamp = int(next(self.ts))
+        time_after_expire = next(self.ts)
+        put_after_expire = next(self.ts)
+        delete_at_container = str(
+            delete_at_timestamp /
+            self.object_controller.expiring_objects_container_divisor *
+            self.object_controller.expiring_objects_container_divisor)
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': inital_put.normal,
+                     'X-Delete-At': str(delete_at_timestamp),
+                     'X-Delete-At-Container': delete_at_container,
+                     'Content-Length': '4',
+                     'Content-Type': 'application/octet-stream'})
+        req.body = 'TEST'
+        resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 201)
+
+        # PUT again before object has expired should fail
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': put_before_expire.normal,
+                     'Content-Length': '4',
+                     'Content-Type': 'application/octet-stream',
+                     'If-None-Match': '*'})
+        req.body = 'TEST'
+        with mock.patch("swift.obj.server.time.time",
+                        lambda: float(put_before_expire.normal)):
+            resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 412)
+
+        # PUT again after object has expired should succeed
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': put_after_expire.normal,
+                     'Content-Length': '4',
+                     'Content-Type': 'application/octet-stream',
+                     'If-None-Match': '*'})
+        req.body = 'TEST'
+        with mock.patch("swift.obj.server.time.time",
+                        lambda: float(time_after_expire.normal)):
+            resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 201)
 
     def test_PUT_common(self):
         timestamp = normalize_timestamp(time())
@@ -2431,7 +2506,7 @@ class TestObjectController(unittest.TestCase):
         timestamp = utils.Timestamp(time()).internal
 
         def put_with_index(expected_rsp, frag_index, node_index=None):
-            data_file_tail = '#%d.data' % frag_index
+            data_file_tail = '#%d#d.data' % frag_index
             headers = {'X-Timestamp': timestamp,
                        'Content-Length': '6',
                        'Content-Type': 'application/octet-stream',
@@ -2483,7 +2558,7 @@ class TestObjectController(unittest.TestCase):
                 # disk file
                 put_with_index(201, 7, 6)
 
-    def test_PUT_durable_files(self):
+    def test_PUT_commits_data(self):
         for policy in POLICIES:
             timestamp = utils.Timestamp(int(time())).internal
             data_file_tail = '.data'
@@ -2492,8 +2567,9 @@ class TestObjectController(unittest.TestCase):
                        'Content-Type': 'application/octet-stream',
                        'X-Backend-Storage-Policy-Index': int(policy)}
             if policy.policy_type == EC_POLICY:
+                # commit renames data file
                 headers['X-Object-Sysmeta-Ec-Frag-Index'] = '2'
-                data_file_tail = '#2.data'
+                data_file_tail = '#2#d.data'
             req = Request.blank(
                 '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
                 headers=headers)
@@ -2509,12 +2585,6 @@ class TestObjectController(unittest.TestCase):
             self.assertTrue(os.path.isfile(data_file),
                             'Expected file %r not found in %r for policy %r'
                             % (data_file, os.listdir(obj_dir), int(policy)))
-            durable_file = os.path.join(obj_dir, timestamp) + '.durable'
-            if policy.policy_type == EC_POLICY:
-                self.assertTrue(os.path.isfile(durable_file))
-                self.assertFalse(os.path.getsize(durable_file))
-            else:
-                self.assertFalse(os.path.isfile(durable_file))
             rmtree(obj_dir)
 
     def test_HEAD(self):
@@ -3315,7 +3385,7 @@ class TestObjectController(unittest.TestCase):
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 202)
 
-        # PUT again at ts_2 but without a .durable file
+        # PUT again at ts_2 but without making the data file durable
         ts_2 = next(ts_iter)
         body = 'NEWER'
         headers = {'X-Timestamp': ts_2.internal,
@@ -3332,8 +3402,7 @@ class TestObjectController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'PUT'},
                             headers=headers)
         req.body = body
-        # patch the commit method to do nothing so EC object gets
-        # no .durable file
+        # patch the commit method to do nothing so EC object is non-durable
         with mock.patch('swift.obj.diskfile.ECDiskFileWriter.commit'):
             resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 201)
@@ -3738,6 +3807,13 @@ class TestObjectController(unittest.TestCase):
             utils.Timestamp(timestamp).internal + '.ts')
         self.assertTrue(os.path.isfile(ts_1003_file))
         self.assertEqual(len(os.listdir(os.path.dirname(ts_1003_file))), 1)
+
+    def test_DELETE_bad_timestamp(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': 'bad'})
+        resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 400)
 
     def test_DELETE_succeeds_with_later_POST(self):
         t_put = next(self.ts).internal
@@ -6096,6 +6172,72 @@ class TestObjectController(unittest.TestCase):
             resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 507)
 
+    def test_REPLICATE_reclaims_tombstones(self):
+        conf = {'devices': self.testdir, 'mount_check': False,
+                'reclaim_age': 100}
+        self.object_controller = object_server.ObjectController(
+            conf, logger=self.logger)
+        for policy in self.iter_policies():
+            # create a tombstone
+            ts = next(self.ts)
+            delete_request = Request.blank(
+                '/sda1/0/a/c/o', method='DELETE',
+                headers={
+                    'x-backend-storage-policy-index': int(policy),
+                    'x-timestamp': ts.internal,
+                })
+            resp = delete_request.get_response(self.object_controller)
+            self.assertEqual(resp.status_int, 404)
+            objfile = self.df_mgr.get_diskfile('sda1', '0', 'a', 'c', 'o',
+                                               policy=policy)
+            tombstone_file = os.path.join(objfile._datadir,
+                                          '%s.ts' % ts.internal)
+            self.assertTrue(os.path.exists(tombstone_file))
+
+            # REPLICATE will hash it
+            req = Request.blank(
+                '/sda1/0', method='REPLICATE',
+                headers={
+                    'x-backend-storage-policy-index': int(policy),
+                })
+            resp = req.get_response(self.object_controller)
+            self.assertEqual(resp.status_int, 200)
+            suffix = pickle.loads(resp.body).keys()[0]
+            self.assertEqual(suffix, os.path.basename(
+                os.path.dirname(objfile._datadir)))
+            # tombstone still exists
+            self.assertTrue(os.path.exists(tombstone_file))
+
+            # after reclaim REPLICATE will rehash
+            replicate_request = Request.blank(
+                '/sda1/0/%s' % suffix, method='REPLICATE',
+                headers={
+                    'x-backend-storage-policy-index': int(policy),
+                })
+            the_future = time() + 200
+            with mock.patch('swift.obj.diskfile.time.time') as mock_time:
+                mock_time.return_value = the_future
+                resp = replicate_request.get_response(self.object_controller)
+            self.assertEqual(resp.status_int, 200)
+            self.assertEqual({}, pickle.loads(resp.body))
+            # and tombstone is reaped!
+            self.assertFalse(os.path.exists(tombstone_file))
+
+            # N.B. with a small reclaim age like this - if proxy clocks get far
+            # enough out of whack ...
+            with mock.patch('swift.obj.diskfile.time.time') as mock_time:
+                mock_time.return_value = the_future
+                resp = delete_request.get_response(self.object_controller)
+                # we won't even create the tombstone
+                self.assertFalse(os.path.exists(tombstone_file))
+                # hashdir sticks around tho
+                self.assertTrue(os.path.exists(objfile._datadir))
+                # REPLICATE will clean it all up
+                resp = replicate_request.get_response(self.object_controller)
+                self.assertEqual(resp.status_int, 200)
+                self.assertEqual({}, pickle.loads(resp.body))
+                self.assertFalse(os.path.exists(objfile._datadir))
+
     def test_SSYNC_can_be_called(self):
         req = Request.blank('/sda1/0',
                             environ={'REQUEST_METHOD': 'SSYNC'},
@@ -6720,6 +6862,7 @@ class TestObjectServer(unittest.TestCase):
         headers = {
             'Expect': '100-continue',
             'Content-Length': len(test_body),
+            'Content-Type': 'application/test',
             'X-Timestamp': utils.Timestamp(time()).internal,
         }
         conn = bufferedhttp.http_connect('127.0.0.1', self.port, 'sda1', '0',
@@ -6737,6 +6880,7 @@ class TestObjectServer(unittest.TestCase):
         headers = {
             'Expect': '100-continue',
             'Content-Length': len(test_body),
+            'Content-Type': 'application/test',
             'X-Timestamp': utils.Timestamp(time()).internal,
             'X-Backend-Obj-Metadata-Footer': 'yes',
             'X-Backend-Obj-Multipart-Mime-Boundary': 'boundary123',
@@ -6755,6 +6899,7 @@ class TestObjectServer(unittest.TestCase):
         headers = {
             'Expect': '100-continue',
             'Content-Length': len(test_body),
+            'Content-Type': 'application/test',
             'X-Timestamp': put_timestamp.internal,
         }
         conn = bufferedhttp.http_connect('127.0.0.1', self.port, 'sda1', '0',
@@ -6935,15 +7080,17 @@ class TestObjectServer(unittest.TestCase):
         self.assertEqual(len(log_lines), 1)
         self.assertIn(' 499 ', log_lines[0])
 
-        # verify successful object data and durable state file write
+        # verify successful object data file write
         found_files = self.find_files()
-        # .data file is there
+        # non durable .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
         self.assertEqual("%s#2.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # but .durable isn't
-        self.assertEqual(found_files['.durable'], [])
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And no container update
         self.assertFalse(_container_update.called)
 
@@ -6973,15 +7120,17 @@ class TestObjectServer(unittest.TestCase):
         self.assertEqual(len(log_lines), 1)
         self.assertIn(' 499 ', log_lines[0])
 
-        # verify successful object data and durable state file write
+        # verify successful object data file write
         found_files = self.find_files()
-        # .data file is there
+        # non durable .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
         self.assertEqual("%s#2.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # but .durable isn't
-        self.assertEqual(found_files['.durable'], [])
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And no container update
         self.assertFalse(_container_update.called)
 
@@ -7030,7 +7179,7 @@ class TestObjectServer(unittest.TestCase):
             resp.read()
             resp.close()
 
-        # verify successful object data and durable state file write
+        # verify successful object data file write
         put_timestamp = context['put_timestamp']
         found_files = self.find_files()
         # .data file is there
@@ -7038,8 +7187,10 @@ class TestObjectServer(unittest.TestCase):
         obj_datafile = found_files['.data'][0]
         self.assertEqual("%s.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # replicated objects do not have a .durable file
-        self.assertEqual(found_files['.durable'], [])
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And container update was called
         self.assertTrue(context['mock_container_update'].called)
 
@@ -7073,13 +7224,12 @@ class TestObjectServer(unittest.TestCase):
         # .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
-        self.assertEqual("%s#2.data" % put_timestamp.internal,
+        self.assertEqual("%s#2#d.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # .durable file is there
-        self.assertEqual(len(found_files['.durable']), 1)
-        durable_file = found_files['.durable'][0]
-        self.assertEqual("%s.durable" % put_timestamp.internal,
-                         os.path.basename(durable_file))
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And container update was called
         self.assertTrue(context['mock_container_update'].called)
 
@@ -7129,8 +7279,7 @@ class TestObjectServer(unittest.TestCase):
 
         # no artifacts left on disk
         found_files = self.find_files()
-        self.assertEqual(len(found_files['.data']), 0)
-        self.assertEqual(len(found_files['.durable']), 0)
+        self.assertFalse(found_files)
         # ... and no container update
         _container_update = context['mock_container_update']
         self.assertFalse(_container_update.called)
@@ -7194,13 +7343,12 @@ class TestObjectServer(unittest.TestCase):
         # .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
-        self.assertEqual("%s#2.data" % put_timestamp.internal,
+        self.assertEqual("%s#2#d.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # .durable file is there
-        self.assertEqual(len(found_files['.durable']), 1)
-        durable_file = found_files['.durable'][0]
-        self.assertEqual("%s.durable" % put_timestamp.internal,
-                         os.path.basename(durable_file))
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And container update was called
         self.assertTrue(context['mock_container_update'].called)
 
@@ -7221,15 +7369,17 @@ class TestObjectServer(unittest.TestCase):
             resp.close()
         put_timestamp = context['put_timestamp']
         _container_update = context['mock_container_update']
-        # verify that durable file was NOT created
+        # verify that durable data file was NOT created
         found_files = self.find_files()
-        # .data file is there
+        # non durable .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
         self.assertEqual("%s#2.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # but .durable isn't
-        self.assertEqual(found_files['.durable'], [])
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And no container update
         self.assertFalse(_container_update.called)
 
@@ -7278,13 +7428,12 @@ class TestObjectServer(unittest.TestCase):
         # .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
-        self.assertEqual("%s#2.data" % put_timestamp.internal,
+        self.assertEqual("%s#2#d.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # .durable file is there
-        self.assertEqual(len(found_files['.durable']), 1)
-        durable_file = found_files['.durable'][0]
-        self.assertEqual("%s.durable" % put_timestamp.internal,
-                         os.path.basename(durable_file))
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # And container update was called
         self.assertTrue(context['mock_container_update'].called)
 
@@ -7328,13 +7477,12 @@ class TestObjectServer(unittest.TestCase):
         # .data file is there
         self.assertEqual(len(found_files['.data']), 1)
         obj_datafile = found_files['.data'][0]
-        self.assertEqual("%s#2.data" % put_timestamp.internal,
+        self.assertEqual("%s#2#d.data" % put_timestamp.internal,
                          os.path.basename(obj_datafile))
-        # ... and .durable is there
-        self.assertEqual(len(found_files['.durable']), 1)
-        durable_file = found_files['.durable'][0]
-        self.assertEqual("%s.durable" % put_timestamp.internal,
-                         os.path.basename(durable_file))
+        # but no other files
+        self.assertFalse(found_files['.data'][1:])
+        found_files.pop('.data')
+        self.assertFalse(found_files)
         # but no container update
         self.assertFalse(context['mock_container_update'].called)
 
@@ -7387,7 +7535,8 @@ class TestZeroCopy(unittest.TestCase):
         url_path = '/sda1/2100/a/c/o'
 
         self.http_conn.request('PUT', url_path, 'obj contents',
-                               {'X-Timestamp': '127082564.24709'})
+                               {'X-Timestamp': '127082564.24709',
+                                'Content-Type': 'application/test'})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
         response.read()
@@ -7405,7 +7554,8 @@ class TestZeroCopy(unittest.TestCase):
         url_path = '/sda1/2100/a/c/o'
 
         self.http_conn.request('PUT', url_path, obj_contents,
-                               {'X-Timestamp': '1402600322.52126'})
+                               {'X-Timestamp': '1402600322.52126',
+                                'Content-Type': 'application/test'})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
         response.read()
@@ -7422,7 +7572,8 @@ class TestZeroCopy(unittest.TestCase):
         ts = '1402601849.47475'
 
         self.http_conn.request('PUT', url_path, 'obj contents',
-                               {'X-Timestamp': ts})
+                               {'X-Timestamp': ts,
+                                'Content-Type': 'application/test'})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
         response.read()
@@ -7453,7 +7604,8 @@ class TestZeroCopy(unittest.TestCase):
 
         self.http_conn.request(
             'PUT', url_path, '',
-            {'X-Timestamp': ts, 'Content-Length': '0'})
+            {'X-Timestamp': ts, 'Content-Length': '0',
+             'Content-Type': 'application/test'})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
         response.read()
@@ -7469,6 +7621,103 @@ class TestZeroCopy(unittest.TestCase):
         self.assertEqual(response.status, 200)  # still there
         contents = response.read()
         self.assertEqual(contents, '')
+
+
+class TestConfigOptionHandling(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = mkdtemp()
+
+    def tearDown(self):
+        rmtree(self.tmpdir)
+
+    def _app_config(self, config):
+        contents = dedent(config)
+        conf_file = os.path.join(self.tmpdir, 'object-server.conf')
+        with open(conf_file, 'w') as f:
+            f.write(contents)
+        return init_request_processor(conf_file, 'object-server')[:2]
+
+    def test_default(self):
+        config = """
+        [DEFAULT]
+
+        [pipeline:main]
+        pipeline = object-server
+
+        [app:object-server]
+        use = egg:swift#object
+        """
+        app, config = self._app_config(config)
+        self.assertNotIn('reclaim_age', config)
+        for policy in POLICIES:
+            self.assertEqual(app._diskfile_router[policy].reclaim_age, 604800)
+
+    def test_option_in_app(self):
+        config = """
+        [DEFAULT]
+
+        [pipeline:main]
+        pipeline = object-server
+
+        [app:object-server]
+        use = egg:swift#object
+        reclaim_age = 100
+        """
+        app, config = self._app_config(config)
+        self.assertEqual(config['reclaim_age'], '100')
+        for policy in POLICIES:
+            self.assertEqual(app._diskfile_router[policy].reclaim_age, 100)
+
+    def test_option_in_default(self):
+        config = """
+        [DEFAULT]
+        reclaim_age = 200
+
+        [pipeline:main]
+        pipeline = object-server
+
+        [app:object-server]
+        use = egg:swift#object
+        """
+        app, config = self._app_config(config)
+        self.assertEqual(config['reclaim_age'], '200')
+        for policy in POLICIES:
+            self.assertEqual(app._diskfile_router[policy].reclaim_age, 200)
+
+    def test_option_in_both(self):
+        config = """
+        [DEFAULT]
+        reclaim_age = 300
+
+        [pipeline:main]
+        pipeline = object-server
+
+        [app:object-server]
+        use = egg:swift#object
+        reclaim_age = 400
+        """
+        app, config = self._app_config(config)
+        self.assertEqual(config['reclaim_age'], '300')
+        for policy in POLICIES:
+            self.assertEqual(app._diskfile_router[policy].reclaim_age, 300)
+
+        # use paste "set" syntax to override global config value
+        config = """
+        [DEFAULT]
+        reclaim_age = 500
+
+        [pipeline:main]
+        pipeline = object-server
+
+        [app:object-server]
+        use = egg:swift#object
+        set reclaim_age = 600
+        """
+        app, config = self._app_config(config)
+        self.assertEqual(config['reclaim_age'], '600')
+        for policy in POLICIES:
+            self.assertEqual(app._diskfile_router[policy].reclaim_age, 600)
 
 
 if __name__ == '__main__':

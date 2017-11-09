@@ -25,6 +25,7 @@ import eventlet.event
 import functools
 import grp
 import logging
+import platform
 import os
 import mock
 import random
@@ -1315,7 +1316,7 @@ class TestUtils(unittest.TestCase):
             self.assertEqual(conf, conf_file)
             # assert defaults
             self.assertEqual(options['verbose'], False)
-            self.assertTrue('once' not in options)
+            self.assertNotIn('once', options)
             # assert verbose as option
             conf, options = utils.parse_options(test_args=[conf_file, '-v'])
             self.assertEqual(options['verbose'], True)
@@ -1550,7 +1551,7 @@ class TestUtils(unittest.TestCase):
             for en in (errno.EIO, errno.ENOSPC):
                 log_exception(OSError(en, 'my %s error message' % en))
                 log_msg = strip_value(sio)
-                self.assertTrue('Traceback' not in log_msg)
+                self.assertNotIn('Traceback', log_msg)
                 self.assertTrue('my %s error message' % en in log_msg)
             # unfiltered
             log_exception(OSError())
@@ -1560,19 +1561,19 @@ class TestUtils(unittest.TestCase):
             log_exception(socket.error(errno.ECONNREFUSED,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('errno.ECONNREFUSED message test' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('errno.ECONNREFUSED message test', log_msg)
             self.assertTrue('Connection refused' in log_msg)
             log_exception(socket.error(errno.EHOSTUNREACH,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('my error message', log_msg)
             self.assertTrue('Host unreachable' in log_msg)
             log_exception(socket.error(errno.ETIMEDOUT, 'my error message'))
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
+            self.assertNotIn('my error message', log_msg)
             self.assertTrue('Connection timeout' in log_msg)
             # unfiltered
             log_exception(socket.error(0, 'my error message'))
@@ -1584,16 +1585,16 @@ class TestUtils(unittest.TestCase):
             connection_timeout = ConnectionTimeout(42, 'my error message')
             log_exception(connection_timeout)
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
             self.assertTrue('ConnectionTimeout' in log_msg)
             self.assertTrue('(42s)' in log_msg)
-            self.assertTrue('my error message' not in log_msg)
+            self.assertNotIn('my error message', log_msg)
             connection_timeout.cancel()
 
             message_timeout = MessageTimeout(42, 'my error message')
             log_exception(message_timeout)
             log_msg = strip_value(sio)
-            self.assertTrue('Traceback' not in log_msg)
+            self.assertNotIn('Traceback', log_msg)
             self.assertTrue('MessageTimeout' in log_msg)
             self.assertTrue('(42s)' in log_msg)
             self.assertTrue('my error message' in log_msg)
@@ -1684,7 +1685,7 @@ class TestUtils(unittest.TestCase):
             logger.error('my error message')
             log_msg = strip_value(sio)
             self.assertTrue('my error message' in log_msg)
-            self.assertTrue('txn' not in log_msg)
+            self.assertNotIn('txn', log_msg)
             logger.txn_id = '12345'
             logger.error('test')
             log_msg = strip_value(sio)
@@ -1710,7 +1711,7 @@ class TestUtils(unittest.TestCase):
             logger.error('my error message')
             log_msg = strip_value(sio)
             self.assertTrue('my error message' in log_msg)
-            self.assertTrue('client_ip' not in log_msg)
+            self.assertNotIn('client_ip', log_msg)
             logger.client_ip = '1.2.3.4'
             logger.error('test')
             log_msg = strip_value(sio)
@@ -1720,8 +1721,8 @@ class TestUtils(unittest.TestCase):
             self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.info('test')
             log_msg = strip_value(sio)
-            self.assertTrue('client_ip' not in log_msg)
-            self.assertTrue('1.2.3.4' not in log_msg)
+            self.assertNotIn('client_ip', log_msg)
+            self.assertNotIn('1.2.3.4', log_msg)
             # test client_ip (and txn) already in message
             self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.warning('test 1.2.3.4 test 12345')
@@ -1984,9 +1985,12 @@ log_name = yarr'''
             expected = {'__file__': conffile, 'log_name': 'section1',
                         'foo': 'bar', 'bar': 'baz'}
             self.assertEqual(result, expected)
-        self.assertRaises(SystemExit, utils.readconf, temppath, 'section3')
+
+        self.assertRaisesRegexp(
+            ValueError, 'Unable to find section3 config section in.*',
+            utils.readconf, temppath, 'section3')
         os.unlink(temppath)
-        self.assertRaises(SystemExit, utils.readconf, temppath)
+        self.assertRaises(IOError, utils.readconf, temppath)
 
     def test_readconf_raw(self):
         conf = '''[section1]
@@ -2010,7 +2014,7 @@ log_name = %(yarr)s'''
                         'section2': {'log_name': '%(yarr)s'}}
             self.assertEqual(result, expected)
         os.unlink(temppath)
-        self.assertRaises(SystemExit, utils.readconf, temppath)
+        self.assertRaises(IOError, utils.readconf, temppath)
 
     def test_readconf_dir(self):
         config_dir = {
@@ -2129,7 +2133,7 @@ log_name = %(yarr)s'''
         for func in required_func_calls:
             self.assertTrue(utils.os.called_funcs[func])
         for func in bad_func_calls:
-            self.assertTrue(func not in utils.os.called_funcs)
+            self.assertNotIn(func, utils.os.called_funcs)
 
     @reset_logger_state
     def test_capture_stdio(self):
@@ -3579,7 +3583,14 @@ cluster_dfw1 = http://dfw1.host/v1/
             called = {}
             # just ionice class uses default priority 0
             utils.modify_priority({'ionice_class': 'IOPRIO_CLASS_RT'}, logger)
-            self.assertEqual(called, {'syscall': (251, 1, pid, 1 << 13)})
+            architecture = os.uname()[4]
+            arch_bits = platform.architecture()[0]
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {'syscall': (251, 1, pid, 1 << 13)})
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {'syscall': (30, 1, pid, 1 << 13)})
+            else:
+                self.fail("Unexpected call: %r" % called)
             called = {}
             # just ionice priority is ignored
             utils.modify_priority({'ionice_priority': '4'}, logger)
@@ -3594,7 +3605,16 @@ cluster_dfw1 = http://dfw1.host/v1/
                 'ionice_class': 'IOPRIO_CLASS_BE',
                 'ionice_priority': '4',
             }, logger)
-            self.assertEqual(called, {'syscall': (251, 1, pid, 2 << 13 | 4)})
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'syscall': (251, 1, pid, 2 << 13 | 4)
+                })
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'syscall': (30, 1, pid, 2 << 13 | 4)
+                })
+            else:
+                self.fail("Unexpected call: %r" % called)
             called = {}
             # all
             utils.modify_priority({
@@ -3602,10 +3622,18 @@ cluster_dfw1 = http://dfw1.host/v1/
                 'ionice_class': 'IOPRIO_CLASS_IDLE',
                 'ionice_priority': '6',
             }, logger)
-            self.assertEqual(called, {
-                'setpriority': (0, pid, -15),
-                'syscall': (251, 1, pid, 3 << 13 | 6),
-            })
+            if architecture == 'x86_64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'setpriority': (0, pid, -15),
+                    'syscall': (251, 1, pid, 3 << 13 | 6),
+                })
+            elif architecture == 'aarch64' and arch_bits == '64bit':
+                self.assertEqual(called, {
+                    'setpriority': (0, pid, -15),
+                    'syscall': (30, 1, pid, 3 << 13 | 6),
+                })
+            else:
+                self.fail("Unexpected call: %r" % called)
 
     def test__NR_ioprio_set(self):
         with patch('os.uname', return_value=('', '', '', '', 'x86_64')), \
@@ -3613,6 +3641,14 @@ cluster_dfw1 = http://dfw1.host/v1/
             self.assertEqual(251, utils.NR_ioprio_set())
 
         with patch('os.uname', return_value=('', '', '', '', 'x86_64')), \
+                patch('platform.architecture', return_value=('32bit', '')):
+            self.assertRaises(OSError, utils.NR_ioprio_set)
+
+        with patch('os.uname', return_value=('', '', '', '', 'aarch64')), \
+                patch('platform.architecture', return_value=('64bit', '')):
+            self.assertEqual(30, utils.NR_ioprio_set())
+
+        with patch('os.uname', return_value=('', '', '', '', 'aarch64')), \
                 patch('platform.architecture', return_value=('32bit', '')):
             self.assertRaises(OSError, utils.NR_ioprio_set)
 
@@ -4029,7 +4065,7 @@ class TestSwiftInfo(unittest.TestCase):
 
         info = utils.get_swift_info()
 
-        self.assertTrue('admin' not in info)
+        self.assertNotIn('admin', info)
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
@@ -4048,19 +4084,19 @@ class TestSwiftInfo(unittest.TestCase):
 
         info = utils.get_swift_info(disallowed_sections=['cap1', 'cap3'])
 
-        self.assertTrue('admin' not in info)
+        self.assertNotIn('admin', info)
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
         self.assertEqual(info['swift']['foo'], 'bar')
 
-        self.assertTrue('cap1' not in info)
+        self.assertNotIn('cap1', info)
 
         self.assertTrue('cap2' in info)
         self.assertTrue('cap2_foo' in info['cap2'])
         self.assertEqual(info['cap2']['cap2_foo'], 'cap2_bar')
 
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
 
     def test_register_swift_admin_info(self):
         utils.register_swift_info(admin=True, admin_foo='admin_bar')
@@ -4084,8 +4120,8 @@ class TestSwiftInfo(unittest.TestCase):
         self.assertEqual(
             utils._swift_admin_info['cap1']['ac1_lorem'], 'ac1_ipsum')
 
-        self.assertTrue('swift' not in utils._swift_info)
-        self.assertTrue('cap1' not in utils._swift_info)
+        self.assertNotIn('swift', utils._swift_info)
+        self.assertNotIn('cap1', utils._swift_info)
 
     def test_get_swift_admin_info(self):
         utils._swift_info = {'swift': {'foo': 'bar'},
@@ -4123,20 +4159,20 @@ class TestSwiftInfo(unittest.TestCase):
         self.assertEqual(info['admin']['admin_cap1']['ac1_foo'], 'ac1_bar')
         self.assertTrue('disallowed_sections' in info['admin'])
         self.assertTrue('cap1' in info['admin']['disallowed_sections'])
-        self.assertTrue('cap2' not in info['admin']['disallowed_sections'])
+        self.assertNotIn('cap2', info['admin']['disallowed_sections'])
         self.assertTrue('cap3' in info['admin']['disallowed_sections'])
 
         self.assertTrue('swift' in info)
         self.assertTrue('foo' in info['swift'])
         self.assertEqual(info['swift']['foo'], 'bar')
 
-        self.assertTrue('cap1' not in info)
+        self.assertNotIn('cap1', info)
 
         self.assertTrue('cap2' in info)
         self.assertTrue('cap2_foo' in info['cap2'])
         self.assertEqual(info['cap2']['cap2_foo'], 'cap2_bar')
 
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
 
     def test_get_swift_admin_info_with_disallowed_sub_sections(self):
         utils._swift_info = {'swift': {'foo': 'bar'},
@@ -4151,10 +4187,10 @@ class TestSwiftInfo(unittest.TestCase):
         info = utils.get_swift_info(
             admin=True, disallowed_sections=['cap1.cap1_foo', 'cap3',
                                              'cap4.a.b.c'])
-        self.assertTrue('cap3' not in info)
+        self.assertNotIn('cap3', info)
         self.assertEqual(info['cap1']['cap1_moo'], 'cap1_baa')
-        self.assertTrue('cap1_foo' not in info['cap1'])
-        self.assertTrue('c' not in info['cap4']['a']['b'])
+        self.assertNotIn('cap1_foo', info['cap1'])
+        self.assertNotIn('c', info['cap4']['a']['b'])
         self.assertEqual(info['cap4']['a']['b.c'], 'b.c')
 
     def test_get_swift_info_with_unmatched_disallowed_sections(self):
@@ -5534,6 +5570,98 @@ class TestLRUCache(unittest.TestCase):
         self.assertEqual(f.size(), 4)
 
 
+class TestSpliterator(unittest.TestCase):
+    def test_string(self):
+        input_chunks = ["coun", "ter-", "b", "ra", "nch-mater",
+                        "nit", "y-fungusy", "-nummular"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(8)), "counter-")
+        self.assertEqual(''.join(si.take(7)), "branch-")
+        self.assertEqual(''.join(si.take(10)), "maternity-")
+        self.assertEqual(''.join(si.take(8)), "fungusy-")
+        self.assertEqual(''.join(si.take(8)), "nummular")
+
+    def test_big_input_string(self):
+        input_chunks = ["iridium"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(2)), "ir")
+        self.assertEqual(''.join(si.take(1)), "i")
+        self.assertEqual(''.join(si.take(2)), "di")
+        self.assertEqual(''.join(si.take(1)), "u")
+        self.assertEqual(''.join(si.take(1)), "m")
+
+    def test_chunk_boundaries(self):
+        input_chunks = ["soylent", "green", "is", "people"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(7)), "soylent")
+        self.assertEqual(''.join(si.take(5)), "green")
+        self.assertEqual(''.join(si.take(2)), "is")
+        self.assertEqual(''.join(si.take(6)), "people")
+
+    def test_no_empty_strings(self):
+        input_chunks = ["soylent", "green", "is", "people"]
+        si = utils.Spliterator(input_chunks)
+
+        outputs = (list(si.take(7))     # starts and ends on chunk boundary
+                   + list(si.take(2))   # spans two chunks
+                   + list(si.take(3))   # begins but does not end chunk
+                   + list(si.take(2))   # ends but does not begin chunk
+                   + list(si.take(6)))  # whole chunk + EOF
+        self.assertNotIn('', outputs)
+
+    def test_running_out(self):
+        input_chunks = ["not much"]
+        si = utils.Spliterator(input_chunks)
+
+        self.assertEqual(''.join(si.take(4)), "not ")
+        self.assertEqual(''.join(si.take(99)), "much")  # short
+        self.assertEqual(''.join(si.take(4)), "")
+        self.assertEqual(''.join(si.take(4)), "")
+
+    def test_overlap(self):
+        input_chunks = ["one fish", "two fish", "red fish", "blue fish"]
+
+        si = utils.Spliterator(input_chunks)
+        t1 = si.take(20)  # longer than first chunk
+        self.assertLess(len(next(t1)), 20)  # it's not exhausted
+
+        t2 = si.take(20)
+        self.assertRaises(ValueError, next, t2)
+
+    def test_closing(self):
+        input_chunks = ["abcd", "efg", "hij"]
+
+        si = utils.Spliterator(input_chunks)
+        it = si.take(3)  # shorter than first chunk
+        self.assertEqual(next(it), 'abc')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['d', 'efg', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        self.assertEqual(list(si.take(1)), ['a'])
+        it = si.take(1)  # still shorter than first chunk
+        self.assertEqual(next(it), 'b')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['cd', 'efg', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        it = si.take(6)  # longer than first chunk, shorter than first + second
+        self.assertEqual(next(it), 'abcd')
+        self.assertEqual(next(it), 'ef')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['g', 'hij'])
+
+        si = utils.Spliterator(input_chunks)
+        self.assertEqual(list(si.take(2)), ['ab'])
+        it = si.take(3)  # longer than rest of chunk
+        self.assertEqual(next(it), 'cd')
+        it.close()
+        self.assertEqual(list(si.take(20)), ['efg', 'hij'])
+
+
 class TestParseContentRange(unittest.TestCase):
     def test_good(self):
         start, end, total = utils.parse_content_range("bytes 100-200/300")
@@ -5893,6 +6021,98 @@ class TestSocketStringParser(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     utils.parse_socket_string(addr, default)
 
+
+class TestHashForFileFunction(unittest.TestCase):
+    def setUp(self):
+        self.tempfilename = tempfile.mktemp()
+
+    def tearDown(self):
+        try:
+            os.unlink(self.tempfilename)
+        except OSError:
+            pass
+
+    def test_hash_for_file_smallish(self):
+        stub_data = 'some data'
+        with open(self.tempfilename, 'wb') as fd:
+            fd.write(stub_data)
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual([mock.call(stub_data)],
+                         mock_hasher.update.call_args_list)
+
+    def test_hash_for_file_big(self):
+        num_blocks = 10
+        block_size = utils.MD5_BLOCK_READ_BYTES
+        truncate = 523
+        start_char = ord('a')
+        expected_blocks = [chr(i) * block_size
+                           for i in range(start_char, start_char + num_blocks)]
+        full_data = ''.join(expected_blocks)
+        trimmed_data = full_data[:-truncate]
+        # sanity
+        self.assertEqual(len(trimmed_data), block_size * num_blocks - truncate)
+        with open(self.tempfilename, 'wb') as fd:
+            fd.write(trimmed_data)
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual(num_blocks, len(mock_hasher.update.call_args_list))
+        found_blocks = []
+        for i, (expected_block, call) in enumerate(zip(
+                expected_blocks, mock_hasher.update.call_args_list)):
+            args, kwargs = call
+            self.assertEqual(kwargs, {})
+            self.assertEqual(1, len(args))
+            block = args[0]
+            if i < num_blocks - 1:
+                self.assertEqual(block, expected_block)
+            else:
+                self.assertEqual(block, expected_block[:-truncate])
+            found_blocks.append(block)
+        self.assertEqual(''.join(found_blocks), trimmed_data)
+
+    def test_hash_for_file_empty(self):
+        with open(self.tempfilename, 'wb'):
+            pass
+        with mock.patch('swift.common.utils.md5') as mock_md5:
+            mock_hasher = mock_md5.return_value
+            rv = utils.md5_hash_for_file(self.tempfilename)
+        self.assertTrue(mock_hasher.hexdigest.called)
+        self.assertEqual(rv, mock_hasher.hexdigest.return_value)
+        self.assertEqual([], mock_hasher.update.call_args_list)
+
+    def test_hash_for_file_brittle(self):
+        data_to_expected_hash = {
+            '': 'd41d8cd98f00b204e9800998ecf8427e',
+            'some data': '1e50210a0202497fb79bc38b6ade6c34',
+            ('a' * 4096 * 10)[:-523]: '06a41551609656c85f14f659055dc6d3',
+        }
+        # unlike some other places where the concrete implementation really
+        # matters for backwards compatibility these brittle tests are probably
+        # not needed or justified, if a future maintainer rips them out later
+        # they're probably doing the right thing
+        failures = []
+        for stub_data, expected_hash in data_to_expected_hash.items():
+            with open(self.tempfilename, 'wb') as fd:
+                fd.write(stub_data)
+            rv = utils.md5_hash_for_file(self.tempfilename)
+            try:
+                self.assertEqual(expected_hash, rv)
+            except AssertionError:
+                trim_cap = 80
+                if len(stub_data) > trim_cap:
+                    stub_data = '%s...<truncated>' % stub_data[:trim_cap]
+                failures.append('hash for %r was %s instead of expected %s' % (
+                    stub_data, rv, expected_hash))
+        if failures:
+            self.fail('Some data did not compute expected hash:\n' +
+                      '\n'.join(failures))
 
 if __name__ == '__main__':
     unittest.main()

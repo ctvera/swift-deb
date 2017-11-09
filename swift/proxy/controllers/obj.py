@@ -1983,7 +1983,7 @@ class ECGetResponseCollection(object):
         # durable. Note that this may be a different bucket than the one this
         # response got added to, and that we may never go and get a durable
         # frag from this node; it is sufficient that we have been told that a
-        # .durable exists, somewhere, at t_durable.
+        # durable frag exists, somewhere, at t_durable.
         t_durable = headers.get('X-Backend-Durable-Timestamp')
         if not t_durable and not t_data_file:
             # obj server not upgraded so assume this response's frag is durable
@@ -2310,6 +2310,9 @@ class ECObjectController(BaseObjectController):
             resp.headers['Content-Length'] = resp.headers.get(
                 'X-Object-Sysmeta-Ec-Content-Length')
             resp.fix_conditional_response()
+        if resp.status_int == HTTP_REQUESTED_RANGE_NOT_SATISFIABLE:
+            resp.headers['Content-Range'] = 'bytes */%s' % resp.headers[
+                'X-Object-Sysmeta-Ec-Content-Length']
 
     def _make_putter(self, node, part, req, headers):
         return MIMEPutter.connect(
@@ -2619,8 +2622,9 @@ class ECObjectController(BaseObjectController):
 
             self._transfer_data(req, policy, data_source, putters,
                                 nodes, min_conns, etag_hasher)
-            # The .durable file will propagate in a replicated fashion; if
-            # one exists, the reconstructor will spread it around.
+            # The durable state will propagate in a replicated fashion; if
+            # one fragment is durable then the reconstructor will spread the
+            # durable status around.
             # In order to avoid successfully writing an object, but refusing
             # to serve it on a subsequent GET because don't have enough
             # durable data fragments - we require the same number of durable

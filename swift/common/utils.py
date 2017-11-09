@@ -117,9 +117,11 @@ def NR_ioprio_set():
     """Give __NR_ioprio_set value for your system."""
     architecture = os.uname()[4]
     arch_bits = platform.architecture()[0]
-    # check if supported system, now support only x86_64
+    # check if supported system, now support x86_64 and AArch64
     if architecture == 'x86_64' and arch_bits == '64bit':
         return 251
+    elif architecture == 'aarch64' and arch_bits == '64bit':
+        return 30
     raise OSError("Swift doesn't support ionice priority for %s %s" %
                   (architecture, arch_bits))
 
@@ -1367,6 +1369,27 @@ class NullLogger(object):
         # "Logs" the args to nowhere
         pass
 
+    def exception(self, *args):
+        pass
+
+    def critical(self, *args):
+        pass
+
+    def error(self, *args):
+        pass
+
+    def warning(self, *args):
+        pass
+
+    def info(self, *args):
+        pass
+
+    def debug(self, *args):
+        pass
+
+    def log(self, *args):
+        pass
+
 
 class LoggerFileObject(object):
 
@@ -2395,6 +2418,8 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
                      not defined)
     :param defaults: dict of default values to pre-populate the config with
     :returns: dict of config items
+    :raises ValueError: if section_name does not exist
+    :raises IOError: if reading the file failed
     """
     if defaults is None:
         defaults = {}
@@ -2411,15 +2436,15 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
         else:
             success = c.read(conf_path)
         if not success:
-            print(_("Unable to read config from %s") % conf_path)
-            sys.exit(1)
+            raise IOError(_("Unable to read config from %s") %
+                          conf_path)
     if section_name:
         if c.has_section(section_name):
             conf = dict(c.items(section_name))
         else:
-            print(_("Unable to find %(section)s config section in %(conf)s") %
-                  {'section': section_name, 'conf': conf_path})
-            sys.exit(1)
+            raise ValueError(
+                _("Unable to find %(section)s config section in %(conf)s") %
+                {'section': section_name, 'conf': conf_path})
         if "log_name" not in conf:
             if log_name is not None:
                 conf['log_name'] = log_name
@@ -3405,6 +3430,83 @@ class LRUCache(object):
         return LRUCacheWrapped()
 
 
+class Spliterator(object):
+    """
+    Takes an iterator yielding sliceable things (e.g. strings or lists) and
+    yields subiterators, each yielding up to the requested number of items
+    from the source.
+
+    >>> si = Spliterator(["abcde", "fg", "hijkl"])
+    >>> ''.join(si.take(4))
+    "abcd"
+    >>> ''.join(si.take(3))
+    "efg"
+    >>> ''.join(si.take(1))
+    "h"
+    >>> ''.join(si.take(3))
+    "ijk"
+    >>> ''.join(si.take(3))
+    "l"  # shorter than requested; this can happen with the last iterator
+
+    """
+    def __init__(self, source_iterable):
+        self.input_iterator = iter(source_iterable)
+        self.leftovers = None
+        self.leftovers_index = 0
+        self._iterator_in_progress = False
+
+    def take(self, n):
+        if self._iterator_in_progress:
+            raise ValueError(
+                "cannot call take() again until the first iterator is"
+                " exhausted (has raised StopIteration)")
+        self._iterator_in_progress = True
+
+        try:
+            if self.leftovers:
+                # All this string slicing is a little awkward, but it's for
+                # a good reason. Consider a length N string that someone is
+                # taking k bytes at a time.
+                #
+                # With this implementation, we create one new string of
+                # length k (copying the bytes) on each call to take(). Once
+                # the whole input has been consumed, each byte has been
+                # copied exactly once, giving O(N) bytes copied.
+                #
+                # If, instead of this, we were to set leftovers =
+                # leftovers[k:] and omit leftovers_index, then each call to
+                # take() would copy k bytes to create the desired substring,
+                # then copy all the remaining bytes to reset leftovers,
+                # resulting in an overall O(N^2) bytes copied.
+                llen = len(self.leftovers) - self.leftovers_index
+                if llen <= n:
+                    n -= llen
+                    to_yield = self.leftovers[self.leftovers_index:]
+                    self.leftovers = None
+                    self.leftovers_index = 0
+                    yield to_yield
+                else:
+                    to_yield = self.leftovers[
+                        self.leftovers_index:(self.leftovers_index + n)]
+                    self.leftovers_index += n
+                    n = 0
+                    yield to_yield
+
+            while n > 0:
+                chunk = next(self.input_iterator)
+                cl = len(chunk)
+                if cl <= n:
+                    n -= cl
+                    yield chunk
+                else:
+                    self.leftovers = chunk
+                    self.leftovers_index = n
+                    yield chunk[:n]
+                    n = 0
+        finally:
+            self._iterator_in_progress = False
+
+
 def tpool_reraise(func, *args, **kwargs):
     """
     Hack to work around Eventlet's tpool not catching and reraising Timeouts.
@@ -4102,3 +4204,20 @@ def safe_json_loads(value):
         except (TypeError, ValueError):
             pass
     return None
+
+
+MD5_BLOCK_READ_BYTES = 4096
+
+
+def md5_hash_for_file(fname):
+    """
+    Get the MD5 checksum of a file.
+
+    :param fname: path to file
+    :returns: MD5 checksum, hex encoded
+    """
+    with open(fname, 'rb') as f:
+        md5sum = md5()
+        for block in iter(lambda: f.read(MD5_BLOCK_READ_BYTES), ''):
+            md5sum.update(block)
+    return md5sum.hexdigest()

@@ -686,7 +686,7 @@ class ObjectController(BaseStorageServer):
         except DiskFileXattrNotSupported:
             return HTTPInsufficientStorage(drive=device, request=request)
         except DiskFileDeleted as e:
-            orig_metadata = e.metadata
+            orig_metadata = {}
             orig_timestamp = e.timestamp
         except (DiskFileNotExist, DiskFileQuarantined):
             orig_metadata = {}
@@ -818,9 +818,9 @@ class ObjectController(BaseStorageServer):
                         send_hundred_continue_response()
                     if not self._read_put_commit_message(mime_documents_iter):
                         return HTTPServerError(request=request)
-                    # got 2nd phase confirmation, write a timestamp.durable
-                    # state file to indicate a successful PUT
 
+                # got 2nd phase confirmation (when required), call commit to
+                # indicate a successful PUT
                 writer.commit(request.timestamp)
 
                 # Drain any remaining MIME docs from the socket. There

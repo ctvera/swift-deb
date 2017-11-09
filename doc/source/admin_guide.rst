@@ -141,7 +141,7 @@ The first line reports that there are 256 partitions with 3 copies in region 1;
 and this is an expected output in this case (single region with 3 replicas) as
 reported by the "Max" value.
 
-However, there is some inbalance in the cluster, more precisely in zone 3. The
+However, there is some imbalance in the cluster, more precisely in zone 3. The
 "Max" reports a maximum of 1 copy in this zone; however 50.00% of the partitions
 are storing 2 replicas in this zone (which is somewhat expected, because there
 are more disks in this zone).
@@ -485,7 +485,7 @@ You can also run the report for only containers or objects::
     100.00% of object copies found (7857 of 7857)
     Sample represents 1.00% of the object partition space
 
-Alternatively, the dispersion report can also be output in json format. This
+Alternatively, the dispersion report can also be output in JSON format. This
 allows it to be more easily consumed by third party utilities::
 
     $ swift-dispersion-report -j
@@ -707,7 +707,9 @@ Request URI                 Description
 /recon/mounted              returns *ALL* currently mounted filesystems
 /recon/unmounted            returns all unmounted drives if mount_check = True
 /recon/diskusage            returns disk utilization for storage devices
+/recon/driveaudit           returns # of drive audit errors
 /recon/ringmd5              returns object/container/account ring md5sums
+/recon/swiftconfmd5         returns swift.conf md5sum
 /recon/quarantined          returns # of quarantined objects/accounts/containers
 /recon/sockstat             returns consumable info from /proc/net/sockstat|6
 /recon/devices              returns list of devices and devices dir i.e. /srv/node
@@ -716,6 +718,9 @@ Request URI                 Description
 /recon/replication/<type>   returns replication info for given type (account, container, object)
 /recon/auditor/<type>       returns auditor stats on last reported scan for given type (account, container, object)
 /recon/updater/<type>       returns last updater sweep times for given type (container, object)
+/recon/expirer/object       returns time elapsed and number of objects deleted during last object expirer sweep
+/recon/version              returns Swift version
+/recon/time                 returns node time
 =========================   ========================================================================================
 
 Note that 'object_replication_last' and 'object_replication_time' in object

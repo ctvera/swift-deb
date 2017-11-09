@@ -152,18 +152,21 @@ ETag_obj_copied:
 ETag_obj_received:
   description: |
     The MD5 checksum of the uploaded object content.
-    The value is not quoted.
+    The value is not quoted. If it is an SLO, it would
+    be MD5 checksum of the segments' etags.
   in: header
   required: true
   type: string
 ETag_obj_req:
   description: |
     The MD5 checksum value of the request body. For
-    example, the MD5 checksum value of the object content. You are
-    strongly recommended to compute the MD5 checksum value of object
-    content and include it in the request. This enables the Object
-    Storage API to check the integrity of the upload. The value is not
-    quoted.
+    example, the MD5 checksum value of the object content. For
+    manifest objects, this value is the MD5 checksum of the
+    concatenated string of ETag values for each of the segments in
+    the manifest. You are strongly recommended to compute
+    the MD5 checksum value and include it in the request. This 
+    enables the Object Storage API to check the integrity of the
+    upload. The value is not quoted.
   in: header
   required: false
   type: string
@@ -172,7 +175,7 @@ ETag_obj_resp:
     For objects smaller than 5 GB, this value is the
     MD5 checksum of the object content. The value is not quoted.  For
     manifest objects, this value is the MD5 checksum of the
-    concatenated string of MD5 checksums and ETags for each of the
+    concatenated string of ETag values for each of the
     segments in the manifest, and not the MD5 checksum of the content
     that was downloaded. Also the value is enclosed in double-quote
     characters.  You are strongly recommended to compute the MD5
@@ -196,7 +199,18 @@ If-Modified-Since:
   in: header
   required: false
   type: string
-If-None-Match:
+If-None-Match-get-request:
+  description: |
+    A client that has one or more entities previously
+    obtained from the resource can verify that none of those entities is
+    current by including a list of their associated entity tags in the
+    ``If-None-Match header`` field.
+    See `Request for Comments: 2616 <http://www.ietf.org/rfc/rfc2616.txt>`_
+    for details.
+  in: header
+  required: false
+  type: string
+If-None-Match-put-request:
   description: |
     In combination with ``Expect: 100-Continue``,
     specify an ``"If-None-Match: *"`` header to query whether the
@@ -256,6 +270,31 @@ Transfer-Encoding:
     Set to ``chunked`` to enable chunked transfer
     encoding. If used, do not set the ``Content-Length`` header to a
     non-zero value.
+  in: header
+  required: false
+  type: string
+X-Account-Access-Control_req:
+  description: |
+    **Note**: `X-Account-Access-Control` is not supported by Keystone auth.
+
+    Sets an account access control list (ACL) that grants access to
+    containers and objects in the account.
+    See `Account ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#account-acls>`_
+    for more information.
+  in: header
+  required: false
+  type: string
+X-Account-Access-Control_resp:
+  description: |
+    **Note**: `X-Account-Access-Control` is not supported by Keystone auth.
+
+    The account access control list (ACL) that grants access to
+    containers and objects in the account.
+    If there is no ACL, this header is not returned by this operation.
+    See `Account ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#account-acls>`_
+    for more information.
   in: header
   required: false
   type: string
@@ -398,7 +437,8 @@ X-Container-Meta-Access-Control-Expose-Headers:
     - All “simple response headers” as listed on
       `http://www.w3.org/TR/cors/#simple-response-header
       <http://www.w3.org/TR/cors/#simple-response-header>`_.
-    - The headers ``etag``, ``x-timestamp``, ``x-trans-id``.
+    - The headers ``etag``, ``x-timestamp``, ``x-trans-id``,
+      ``x-openstack-request-id``.
     - All metadata headers (``X-Container-Meta-*`` for containers and
       ``X-Object-Meta-*`` for objects).
     - headers listed in ``X-Container-Meta-Access-Control-Expose-Headers``.
@@ -527,7 +567,9 @@ X-Container-Read:
     or to perform a GET or HEAD operation on the container itself.
 
     The format and scope of the ACL is dependent on the authorization system
-    used by the Object Storage service.
+    used by the Object Storage service. See `Container ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#container-acls>`_
+    for more information.
   in: header
   required: false
   type: string
@@ -535,6 +577,9 @@ X-Container-Read_resp:
   description: |
     The ACL that grants read access. If there is no ACL, this
     header is not returned by this operation.
+    See `Container ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#container-acls>`_
+    for more information.
   in: header
   required: false
   type: string
@@ -582,7 +627,9 @@ X-Container-Write:
     metadata.
 
     The format of the ACL is dependent on the authorization system
-    used by the Object Storage service.
+    used by the Object Storage service.  See `Container ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#container-acls>`_
+    for more information.
 
   in: header
   required: false
@@ -591,6 +638,9 @@ X-Container-Write_resp:
   description:
     The ACL that grants write access. If there is no ACL,
     this header is not returned by this operation.
+    See `Container ACLs
+    <http://docs.openstack.org/developer/swift/overview_acl.html#container-acls>`_
+    for more information.
   in: header
   required: false
   type: string
@@ -732,6 +782,14 @@ X-Object-Meta-name_resp:
   in: header
   required: false
   type: string
+X-Openstack-Request-Id:
+  description: |
+    A unique transaction ID for this request. Your
+    service provider might need this value if you report a problem.
+    (same as ``X-Trans-Id``)
+  in: header
+  required: true
+  type: string
 X-Remove-Account-name:
   description: |
     Removes the metadata item named ``name``.
@@ -808,12 +866,12 @@ X-Trans-Id-Extra:
     Extra transaction information. Use the ``X-Trans-Id-Extra``
     request header to include extra information to help you
     debug any errors that might occur with large object upload and
-    other Object Storage transactions.  Object Storage appends the
+    other Object Storage transactions.  The server appends the
     first 32 characters of the ``X-Trans-Id-Extra`` request header
     value to the transaction ID value in the generated ``X-Trans-Id``
     response header. You must UTF-8-encode and then URL-encode the
-    extra transaction information before you include it in the ``X
-    -Trans-Id-Extra`` request header.  For example, you can include
+    extra transaction information before you include it in the
+    ``X-Trans-Id-Extra`` request header.  For example, you can include
     extra transaction information when you upload `large objects
     <http://docs.openstack.org/developer/swift/api/large_objects.html>`_
     such as images. When
@@ -1033,8 +1091,10 @@ swiftinfo_sig:
 temp_url_expires:
   description: |
     The date and time in `UNIX Epoch time stamp
-    format <https://en.wikipedia.org/wiki/Unix_time>`_ when the
-    signature for temporary URLs expires.  For example, ``1440619048``
+    format <https://en.wikipedia.org/wiki/Unix_time>`_ or
+    `ISO 8601 UTC timestamp <https://en.wikipedia.org/wiki/ISO_8601>`_
+    when the signature for temporary URLs expires.
+    For example, ``1440619048`` or ``2015-08-26T19:57:28Z``
     is equivalent to ``Mon, Wed, 26 Aug 2015 19:57:28 GMT``.  For more
     information about temporary URLs, see `Temporary URL middleware
     <http://docs.openstack.org/developer/swift/api/temporary

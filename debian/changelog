@@ -1,60 +1,9 @@
-swift (2.10.2-1~deb9u1) stretch; urgency=medium
+swift (2.13.1-1) unstable; urgency=medium
 
-  * New upstream stable release
-  * Removed patches applied upstream:
-    - Quarantine_malformed_database_schema_SQLite_errors.patch
-    - For_any_part_only_one_replica_can_move_in_a_rebalance.patch
-    - FTBFS_i386.patch
+  * New upstream version
+  * Added patch fix-test-drop-privileges.patch
 
- -- Ondřej Nový <onovy@debian.org>  Wed, 21 Jun 2017 23:16:47 +0200
-
-swift (2.10.1-3) unstable; urgency=medium
-
-  * d/patches/FTBFS_i386.patch: Fix FTBFS on i386 (Closes: #860638)
-
- -- Ondřej Nový <onovy@debian.org>  Thu, 20 Apr 2017 22:51:28 +0200
-
-swift (2.10.1-2) unstable; urgency=medium
-
-  * Don't start rsyslog during postinst/postrm if it's stopped
-  * d/tests
-    - Added Python module import test
-    - Added daemons test
-  * Added patches from upstream master:
-    - For any part only one replica can move in a rebalance
-    - Quarantine malformed database schema SQLite errors
-
- -- Ondřej Nový <onovy@debian.org>  Fri, 13 Jan 2017 10:05:12 +0100
-
-swift (2.10.1-1) unstable; urgency=medium
-
-  * New upstream release
-  * Bumped debhelper version to 10
-
- -- Ondřej Nový <onovy@debian.org>  Thu, 15 Dec 2016 16:11:51 +0100
-
-swift (2.10.0-3) unstable; urgency=medium
-
-  * Run swift-drive-audit cron by root
-    (needed for /var/log/kern.log reading and umount command)
-
- -- Ondřej Nový <onovy@debian.org>  Mon, 17 Oct 2016 14:40:10 +0200
-
-swift (2.10.0-2) unstable; urgency=medium
-
-  * Uploading to unstable
-
- -- Ondřej Nový <onovy@debian.org>  Fri, 07 Oct 2016 10:33:11 +0200
-
-swift (2.10.0-1) experimental; urgency=medium
-
-  * New upstream release
-  * d/s/options: extend-diff-ignore of .gitreview
-  * d/control: Using OpenStack's Gerrit as VCS URLs.
-  * Bump required version of dnspython to 1.14.0
-  * Added missing manpages from upstream
-
- -- Ondřej Nový <onovy@debian.org>  Thu, 29 Sep 2016 09:43:09 +0200
+ -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 07 Nov 2017 10:59:33 +0200
 
 swift (2.9.0-2) experimental; urgency=medium
 

@@ -492,8 +492,8 @@ class RingBuilder(object):
                 break
         else:
             finish_status = 'Unable to finish'
-        self.logger.debug('%s rebalance plan after %s attempts' % (
-            finish_status, gather_count + 1))
+        self.logger.debug('%(status)s rebalance plan after %(count)s attempts',
+                          {'status': finish_status, 'count': gather_count + 1})
 
         self.devs_changed = False
         self.version += 1
@@ -743,10 +743,12 @@ class RingBuilder(object):
                     'Device %s has zero weight and '
                     'should not want any replicas' % (tier,))
             required = (wanted[tier] - weighted[tier]) / weighted[tier]
-            self.logger.debug('%s wants %s and is weighted for %s so '
-                              'therefore requires %s overload' % (
-                                  tier, wanted[tier], weighted[tier],
-                                  required))
+            self.logger.debug('%(tier)s wants %(wanted)s and is weighted for '
+                              '%(weight)s so therefore requires %(required)s '
+                              'overload', {'tier': tier,
+                                           'wanted': wanted[tier],
+                                           'weight': weighted[tier],
+                                           'required': required})
             if required > max_overload:
                 max_overload = required
         return max_overload
@@ -1064,8 +1066,6 @@ class RingBuilder(object):
             overweight_dev_replica.sort(
                 key=lambda dr: dr[0]['parts_wanted'])
             for dev, replica in overweight_dev_replica:
-                if (not self._can_part_move(part)):
-                    break
                 if any(replica_plan[tier]['min'] <=
                        replicas_at_tier[tier] <
                        replica_plan[tier]['max']
@@ -1084,6 +1084,7 @@ class RingBuilder(object):
                 for tier in dev['tiers']:
                     replicas_at_tier[tier] -= 1
                 self._set_part_moved(part)
+                break
 
     def _gather_parts_for_balance(self, assign_parts, replica_plan):
         """
@@ -1097,9 +1098,10 @@ class RingBuilder(object):
         random_half = random.randint(0, self.parts / 2)
         start = (self._last_part_gather_start + quarter_turn +
                  random_half) % self.parts
-        self.logger.debug('Gather start is %s '
-                          '(Last start was %s)' % (
-                              start, self._last_part_gather_start))
+        self.logger.debug('Gather start is %(start)s '
+                          '(Last start was %(last_start)s)',
+                          {'start': start,
+                           'last_start': self._last_part_gather_start})
         self._last_part_gather_start = start
 
         self._gather_parts_for_balance_can_disperse(
@@ -1139,20 +1141,19 @@ class RingBuilder(object):
 
             overweight_dev_replica.sort(
                 key=lambda dr: dr[0]['parts_wanted'])
-            for dev, replica in overweight_dev_replica:
-                if (not self._can_part_move(part)):
-                    break
-                # this is the most overweight_device holding a replica of this
-                # part we don't know where it's going to end up - but we'll
-                # pick it up and hope for the best.
-                dev['parts_wanted'] += 1
-                dev['parts'] -= 1
-                assign_parts[part].append(replica)
-                self.logger.debug(
-                    "Gathered %d/%d from dev %d [weight forced]",
-                    part, replica, dev['id'])
-                self._replica2part2dev[replica][part] = NONE_DEV
-                self._set_part_moved(part)
+
+            dev, replica = overweight_dev_replica[0]
+            # this is the most overweight_device holding a replica of this
+            # part we don't know where it's going to end up - but we'll
+            # pick it up and hope for the best.
+            dev['parts_wanted'] += 1
+            dev['parts'] -= 1
+            assign_parts[part].append(replica)
+            self.logger.debug(
+                "Gathered %d/%d from dev %d [weight forced]",
+                part, replica, dev['id'])
+            self._replica2part2dev[replica][part] = NONE_DEV
+            self._set_part_moved(part)
 
     def _reassign_parts(self, reassign_parts, replica_plan):
         """
@@ -1709,13 +1710,13 @@ class RingBuilder(object):
         return matched_devs
 
     def increase_partition_power(self):
-        """ Increases ring partition power by one.
+        """
+        Increases ring partition power by one.
 
         Devices will be assigned to partitions like this:
 
         OLD: 0, 3, 7, 5, 2, 1, ...
         NEW: 0, 0, 3, 3, 7, 7, 5, 5, 2, 2, 1, 1, ...
-
         """
 
         new_replica2part2dev = []

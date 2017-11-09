@@ -485,8 +485,10 @@ class Range(object):
             else:
                 start = None
             if end:
-                # when end contains non numeric value, this also causes
-                # ValueError
+                # We could just rely on int() raising the ValueError, but
+                # this catches things like '--0'
+                if not end.isdigit():
+                    raise ValueError('Invalid Range header: %s' % headerval)
                 end = int(end)
                 if end < 0:
                     raise ValueError('Invalid Range header: %s' % headerval)
@@ -1247,9 +1249,13 @@ class Response(object):
             ranges = self.request.range.ranges_for_length(self.content_length)
             if ranges == []:
                 self.status = 416
-                self.content_length = 0
                 close_if_possible(app_iter)
-                return ['']
+                self.headers['Content-Range'] = \
+                    'bytes */%d' % self.content_length
+                # Setting body + app_iter to None makes us emit the default
+                # body text from RESPONSE_REASONS.
+                body = None
+                app_iter = None
             elif ranges:
                 range_size = len(ranges)
                 if range_size > 0:

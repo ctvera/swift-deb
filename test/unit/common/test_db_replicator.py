@@ -38,6 +38,7 @@ from swift.common.swob import HTTPException
 
 from test import unit
 from test.unit.common.test_db import ExampleBroker
+from test.unit import with_tempdir
 
 
 TEST_ACCOUNT_NAME = 'a c t'
@@ -1094,6 +1095,74 @@ class TestDBReplicator(unittest.TestCase):
         finally:
             rmtree(drive)
 
+    @with_tempdir
+    def test_empty_suffix_and_hash_dirs_get_cleanedup(self, tempdir):
+        datadir = os.path.join(tempdir, 'containers')
+        db_path = ('450/afd/7089ab48d955ab0851fc51cc17a34afd/'
+                   '7089ab48d955ab0851fc51cc17a34afd.db')
+        random_file = ('1060/xyz/1234ab48d955ab0851fc51cc17a34xyz/'
+                       '1234ab48d955ab0851fc51cc17a34xyz.abc')
+
+        # trailing "/" indicates empty dir
+        paths = [
+            # empty part dir
+            '240/',
+            # empty suffix dir
+            '18/aba/',
+            # empty hashdir
+            '1054/27e/d41d8cd98f00b204e9800998ecf8427e/',
+            # database
+            db_path,
+            # non database file
+            random_file,
+        ]
+        for path in paths:
+            path = os.path.join(datadir, path)
+            os.makedirs(os.path.dirname(path))
+            if os.path.basename(path):
+                # our setup requires "directories" to end in "/" (i.e. basename
+                # is ''); otherwise, create an empty file
+                open(path, 'w')
+        # sanity
+        self.assertEqual({'240', '18', '1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+        for path in paths:
+            dirpath = os.path.join(datadir, os.path.dirname(path))
+            self.assertTrue(os.path.isdir(dirpath))
+
+        node_id = 1
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        expected = [
+            ('450', os.path.join(datadir, db_path), node_id),
+        ]
+        self.assertEqual(results, expected)
+
+        # all the empty leaf dirs are cleaned up
+        for path in paths:
+            if os.path.basename(path):
+                check = self.assertTrue
+            else:
+                check = self.assertFalse
+            dirpath = os.path.join(datadir, os.path.dirname(path))
+            isdir = os.path.isdir(dirpath)
+            check(isdir, '%r is%s a directory!' % (
+                dirpath, '' if isdir else ' not'))
+
+        # despite the leaves cleaned up it takes a few loops to finish it off
+        self.assertEqual({'18', '1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        self.assertEqual(results, expected)
+        self.assertEqual({'1054', '1060', '450'},
+                         set(os.listdir(datadir)))
+
+        results = list(db_replicator.roundrobin_datadirs([(datadir, node_id)]))
+        self.assertEqual(results, expected)
+        # non db file in '1060' dir is not deleted and exception is handled
+        self.assertEqual({'1060', '450'},
+                         set(os.listdir(datadir)))
+
     def test_roundrobin_datadirs(self):
         listdir_calls = []
         isdir_calls = []
@@ -1162,18 +1231,12 @@ class TestDBReplicator(unittest.TestCase):
         def _rmdir(arg):
             rmdir_calls.append(arg)
 
-        orig_listdir = db_replicator.os.listdir
-        orig_isdir = db_replicator.os.path.isdir
-        orig_exists = db_replicator.os.path.exists
-        orig_shuffle = db_replicator.random.shuffle
-        orig_rmdir = db_replicator.os.rmdir
-
-        try:
-            db_replicator.os.listdir = _listdir
-            db_replicator.os.path.isdir = _isdir
-            db_replicator.os.path.exists = _exists
-            db_replicator.random.shuffle = _shuffle
-            db_replicator.os.rmdir = _rmdir
+        base = 'swift.common.db_replicator.'
+        with mock.patch(base + 'os.listdir', _listdir), \
+                mock.patch(base + 'os.path.isdir', _isdir), \
+                mock.patch(base + 'os.path.exists', _exists), \
+                mock.patch(base + 'random.shuffle', _shuffle), \
+                mock.patch(base + 'os.rmdir', _rmdir):
 
             datadirs = [('/srv/node/sda/containers', 1),
                         ('/srv/node/sdb/containers', 2)]
@@ -1266,12 +1329,6 @@ class TestDBReplicator(unittest.TestCase):
             self.assertEqual(
                 rmdir_calls, ['/srv/node/sda/containers/9999',
                               '/srv/node/sdb/containers/9999'])
-        finally:
-            db_replicator.os.listdir = orig_listdir
-            db_replicator.os.path.isdir = orig_isdir
-            db_replicator.os.path.exists = orig_exists
-            db_replicator.random.shuffle = orig_shuffle
-            db_replicator.os.rmdir = orig_rmdir
 
     @mock.patch("swift.common.db_replicator.ReplConnection", mock.Mock())
     def test_http_connect(self):

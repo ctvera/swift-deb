@@ -138,8 +138,8 @@ class TestContainerController(unittest.TestCase):
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         response = req.get_response(self.controller)
         self.assertTrue(response.status.startswith('204'))
-        self.assertTrue('x-container-read' not in response.headers)
-        self.assertTrue('x-container-write' not in response.headers)
+        self.assertNotIn('x-container-read', response.headers)
+        self.assertNotIn('x-container-write', response.headers)
         # Ensure POSTing acls works
         req = Request.blank(
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
@@ -165,8 +165,8 @@ class TestContainerController(unittest.TestCase):
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         response = req.get_response(self.controller)
         self.assertTrue(response.status.startswith('204'))
-        self.assertTrue('x-container-read' not in response.headers)
-        self.assertTrue('x-container-write' not in response.headers)
+        self.assertNotIn('x-container-read', response.headers)
+        self.assertNotIn('x-container-write', response.headers)
         # Ensure PUTing acls works
         req = Request.blank(
             '/sda1/p/a/c2', environ={'REQUEST_METHOD': 'PUT'},
@@ -738,7 +738,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue('x-container-meta-test' not in resp.headers)
+        self.assertNotIn('x-container-meta-test', resp.headers)
 
     def test_PUT_GET_sys_metadata(self):
         prefix = get_sys_meta_prefix('container')
@@ -796,7 +796,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue(key.lower() not in resp.headers)
+        self.assertNotIn(key.lower(), resp.headers)
 
     def test_PUT_invalid_partition(self):
         req = Request.blank('/sda1/./a/c', environ={'REQUEST_METHOD': 'PUT',
@@ -879,7 +879,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue('x-container-meta-test' not in resp.headers)
+        self.assertNotIn('x-container-meta-test', resp.headers)
         self.assertEqual(resp.headers.get('x-put-timestamp'),
                          '0000000004.00000')
 
@@ -931,7 +931,7 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 204)
-        self.assertTrue(key.lower() not in resp.headers)
+        self.assertNotIn(key.lower(), resp.headers)
 
     def test_POST_invalid_partition(self):
         req = Request.blank('/sda1/./a/c', environ={'REQUEST_METHOD': 'POST',

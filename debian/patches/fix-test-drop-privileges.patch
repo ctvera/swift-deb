@@ -1,0 +1,27 @@
+Description: Drop group comparison from
+ drop_privileges test as it does not appear to be valid
+ https://bugs.launchpad.net/swift/+bug/1724342
+Author: Corey Bryant <corey.bryant@canonical.com>
+Last-Update: 2017-11-07
+
+--- a/test/unit/common/test_utils.py
++++ b/test/unit/common/test_utils.py
+@@ -23,7 +23,6 @@ import errno
+ import eventlet
+ import eventlet.event
+ import functools
+-import grp
+ import logging
+ import platform
+ import os
+@@ -2107,10 +2106,6 @@ log_name = %(yarr)s'''
+         import pwd
+         self.assertEqual(pwd.getpwnam(user)[5], utils.os.environ['HOME'])
+ 
+-        groups = [g.gr_gid for g in grp.getgrall() if user in g.gr_mem]
+-        groups.append(pwd.getpwnam(user).pw_gid)
+-        self.assertEqual(set(groups), set(os.getgroups()))
+-
+         # reset; test same args, OSError trying to get session leader
+         utils.os = MockOs(called_funcs=required_func_calls,
+                           raise_funcs=('setsid',))

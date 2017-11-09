@@ -120,7 +120,7 @@ use = egg:swift#proxy
 # Timeouts from these requests can be recovered from so setting this to
 # something lower than node_timeout would provide quicker error recovery
 # while allowing for a longer timeout for non-recoverable requests (PUTs).
-# Defaults to node_timeout, should be overriden if node_timeout is set to a
+# Defaults to node_timeout, should be overridden if node_timeout is set to a
 # high number to prevent client timeouts from firing before the proxy server
 # has a chance to retry.
 # recoverable_node_timeout = node_timeout
@@ -327,6 +327,12 @@ user_test5_tester5 = testing5 service
 # auth_uri = http://keystonehost:5000
 # auth_url = http://keystonehost:35357
 # auth_plugin = password
+# The following credentials must match the Keystone credentials for the Swift
+# service and may need to be changed to match your Keystone configuration. The
+# example values shown here assume a user named 'swift' with admin role on a
+# project named 'service', both being in the Keystone domain with id 'default'.
+# Refer to the keystonemiddleware documentation link above [1] for other
+# examples.
 # project_domain_id = default
 # user_domain_id = default
 # project_name = service
@@ -692,10 +698,17 @@ use = egg:swift#slo
 # Time limit on GET requests (seconds)
 # max_get_time = 86400
 #
-# When deleting with ?multipart-manifest=delete, multiple deletes may be
-# executed in parallel. Avoid setting this too high, as it gives clients a
-# force multiplier which may be used in DoS attacks. The suggested range is
-# between 2 and 10.
+# When creating an SLO, multiple segment validations may be executed in
+# parallel. Further, multiple deletes may be executed in parallel when deleting
+# with ?multipart-manifest=delete. Use this setting to limit how many
+# subrequests may be executed concurrently. Avoid setting it too high, as it
+# gives clients a force multiplier which may be used in DoS attacks. The
+# suggested range is between 2 and 10.
+# concurrency = 2
+#
+# This may be used to separately tune validation and delete concurrency values.
+# Default is to use the concurrency value from above; all of the same caveats
+# apply regarding recommended ranges.
 # delete_concurrency = 2
 
 # Note: Put after auth and staticweb in the pipeline.
@@ -795,12 +808,14 @@ use = egg:swift#versioned_writes
 # If you don't put it in the pipeline, it will be inserted for you.
 [filter:copy]
 use = egg:swift#copy
-# Set object_post_as_copy = false to turn on fast posts where only the metadata
-# changes are stored anew and the original data file is kept in place. This
-# makes for quicker posts.
-# When object_post_as_copy is set to True, a POST request will be transformed
-# into a COPY request where source and destination objects are the same.
-# object_post_as_copy = true
+# By default object POST requests update metadata without modification of the
+# original data file
+# Set this to True to enable the old, slow behavior wherein object POST
+# requests are transformed into COPY requests where source and destination are
+# the same. All client-visible behavior (save response time) should be
+# identical.
+# This option is deprecated and will be ignored in a future release.
+# object_post_as_copy = false
 
 # Note: To enable encryption, add the following 2 dependent pieces of crypto
 # middleware to the proxy-server pipeline. They should be to the right of all

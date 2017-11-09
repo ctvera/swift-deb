@@ -31,10 +31,11 @@ from swift.common.utils import Timestamp
 from swift.obj import ssync_sender, server
 from swift.obj.reconstructor import RebuildingECDiskFileStream, \
     ObjectReconstructor
+from swift.obj.replicator import ObjectReplicator
 
 from test import listen_zero
 from test.unit import patch_policies, debug_logger, encode_frag_archive_bodies
-from test.unit.obj.common import BaseTest, FakeReplicator
+from test.unit.obj.common import BaseTest
 
 
 class TestBaseSsync(BaseTest):
@@ -47,13 +48,6 @@ class TestBaseSsync(BaseTest):
     """
     def setUp(self):
         super(TestBaseSsync, self).setUp()
-        self.device = 'dev'
-        self.partition = '9'
-        # sender side setup
-        self.tx_testdir = os.path.join(self.tmpdir, 'tmp_test_ssync_sender')
-        utils.mkdirs(os.path.join(self.tx_testdir, self.device))
-        self.daemon = FakeReplicator(self.tx_testdir)
-
         # rx side setup
         self.rx_testdir = os.path.join(self.tmpdir, 'tmp_test_ssync_receiver')
         utils.mkdirs(os.path.join(self.rx_testdir, self.device))
@@ -143,7 +137,7 @@ class TestBaseSsync(BaseTest):
         return diskfiles
 
     def _open_tx_diskfile(self, obj_name, policy, frag_index=None):
-        df_mgr = self.daemon._diskfile_router[policy]
+        df_mgr = self.daemon._df_router[policy]
         df = df_mgr.get_diskfile(
             self.device, self.partition, account='a', container='c',
             obj=obj_name, policy=policy, frag_index=frag_index)
@@ -311,6 +305,8 @@ class TestBaseSsyncEC(TestBaseSsync):
     def setUp(self):
         super(TestBaseSsyncEC, self).setUp()
         self.policy = POLICIES.default
+        self.daemon = ObjectReconstructor(self.daemon_conf,
+                                          debug_logger('test-ssync-sender'))
 
     def _get_object_data(self, path, frag_index=None, **kwargs):
         # return a frag archive for given object name and frag index.
@@ -338,7 +334,7 @@ class TestSsyncEC(TestBaseSsyncEC):
         tx_objs = {}
         rx_objs = {}
         tx_tombstones = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
         # o1 has primary and handoff fragment archives
         t1 = next(self.ts_iter)
@@ -412,9 +408,9 @@ class TestSsyncEC(TestBaseSsyncEC):
             tx_objs, policy, frag_index, rx_node_index)
         self._verify_tombstones(tx_tombstones, policy)
 
-    def test_handoff_fragment_only_missing_durable(self):
+    def test_handoff_fragment_only_missing_durable_state(self):
         # test that a sync_revert type job does not PUT when the rx is only
-        # missing a durable file
+        # missing durable state
         policy = POLICIES.default
         rx_node_index = frag_index = 0
         tx_node_index = 1
@@ -422,15 +418,15 @@ class TestSsyncEC(TestBaseSsyncEC):
         # create sender side diskfiles...
         tx_objs = {}
         rx_objs = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
 
         expected_subreqs = defaultdict(list)
 
-        # o1 in sync on rx but rx missing .durable - no PUT required
-        t1a = next(self.ts_iter)  # older rx .data with .durable
+        # o1 in sync on rx but rx missing durable state - no PUT required
+        t1a = next(self.ts_iter)  # older durable rx .data
         t1b = next(self.ts_iter)  # rx .meta
-        t1c = next(self.ts_iter)  # tx .data with .durable, rx missing .durable
+        t1c = next(self.ts_iter)  # durable tx .data, non-durable rx .data
         obj_name = 'o1'
         tx_objs[obj_name] = self._create_ondisk_files(
             tx_df_mgr, obj_name, policy, t1c, (tx_node_index, rx_node_index,))
@@ -441,7 +437,7 @@ class TestSsyncEC(TestBaseSsyncEC):
         rx_objs[obj_name] = self._create_ondisk_files(
             rx_df_mgr, obj_name, policy, t1c, (rx_node_index, 9), commit=False)
 
-        # o2 on rx has wrong frag_indexes and missing .durable - PUT required
+        # o2 on rx has wrong frag_indexes and is non-durable - PUT required
         t2 = next(self.ts_iter)
         obj_name = 'o2'
         tx_objs[obj_name] = self._create_ondisk_files(
@@ -450,7 +446,7 @@ class TestSsyncEC(TestBaseSsyncEC):
             rx_df_mgr, obj_name, policy, t2, (12, 13), commit=False)
         expected_subreqs['PUT'].append(obj_name)
 
-        # o3 on rx has frag at other time missing .durable - PUT required
+        # o3 on rx has frag at other time and non-durable - PUT required
         t3 = next(self.ts_iter)
         obj_name = 'o3'
         tx_objs[obj_name] = self._create_ondisk_files(
@@ -532,7 +528,7 @@ class TestSsyncEC(TestBaseSsyncEC):
         tx_objs = {}
         tx_tombstones = {}
         rx_objs = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
         # o1 only has primary
         t1 = next(self.ts_iter)
@@ -632,7 +628,7 @@ class TestSsyncEC(TestBaseSsyncEC):
 
     def test_send_with_frag_index_none(self):
         policy = POLICIES.default
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
         # create an ec fragment on the remote node
         ts1 = next(self.ts_iter)
@@ -680,6 +676,396 @@ class TestSsyncEC(TestBaseSsyncEC):
         self.assertIn("Expected status 200; got 400", error_msg)
         self.assertIn("Invalid X-Backend-Ssync-Frag-Index 'Not a number'",
                       error_msg)
+
+    def test_revert_job_with_legacy_durable(self):
+        # test a sync_revert type job using a sender object with a legacy
+        # durable file, that will create a receiver object with durable data
+        policy = POLICIES.default
+        rx_node_index = 0
+        # for a revert job we iterate over frag index that belongs on
+        # remote node
+        frag_index = rx_node_index
+
+        # create non durable tx obj by not committing, then create a legacy
+        # .durable file
+        tx_objs = {}
+        tx_df_mgr = self.daemon._df_router[policy]
+        rx_df_mgr = self.rx_controller._diskfile_router[policy]
+        t1 = next(self.ts_iter)
+        tx_objs['o1'] = self._create_ondisk_files(
+            tx_df_mgr, 'o1', policy, t1, (rx_node_index,), commit=False)
+        tx_datadir = tx_objs['o1'][0]._datadir
+        durable_file = os.path.join(tx_datadir, t1.internal + '.durable')
+        with open(durable_file, 'wb'):
+            pass
+        self.assertEqual(2, len(os.listdir(tx_datadir)))  # sanity check
+
+        suffixes = [os.path.basename(os.path.dirname(tx_datadir))]
+
+        # create ssync sender instance...
+        job = {'device': self.device,
+               'partition': self.partition,
+               'policy': policy,
+               'frag_index': frag_index}
+        node = dict(self.rx_node)
+        node.update({'index': rx_node_index})
+        sender = ssync_sender.Sender(self.daemon, node, job, suffixes)
+        # wrap connection from tx to rx to capture ssync messages...
+        sender.connect, trace = self.make_connect_wrapper(sender)
+
+        # run the sync protocol...
+        sender()
+
+        # verify protocol
+        results = self._analyze_trace(trace)
+        self.assertEqual(1, len(results['tx_missing']))
+        self.assertEqual(1, len(results['rx_missing']))
+        self.assertEqual(1, len(results['tx_updates']))
+        self.assertFalse(results['rx_updates'])
+
+        # sanity check - rx diskfile is durable
+        expected_rx_file = '%s#%s#d.data' % (t1.internal, rx_node_index)
+        rx_df = self._open_rx_diskfile('o1', policy, rx_node_index)
+        self.assertEqual([expected_rx_file], os.listdir(rx_df._datadir))
+
+        # verify on disk files...
+        self._verify_ondisk_files(
+            tx_objs, policy, frag_index, rx_node_index)
+
+        # verify that tx and rx both generate the same suffix hashes...
+        tx_hashes = tx_df_mgr.get_hashes(
+            self.device, self.partition, suffixes, policy)
+        rx_hashes = rx_df_mgr.get_hashes(
+            self.device, self.partition, suffixes, policy)
+        self.assertEqual(suffixes, tx_hashes.keys())  # sanity
+        self.assertEqual(tx_hashes, rx_hashes)
+
+        # sanity check - run ssync again and expect no sync activity
+        sender = ssync_sender.Sender(self.daemon, node, job, suffixes)
+        sender.connect, trace = self.make_connect_wrapper(sender)
+        sender()
+        results = self._analyze_trace(trace)
+        self.assertEqual(1, len(results['tx_missing']))
+        self.assertFalse(results['rx_missing'])
+        self.assertFalse(results['tx_updates'])
+        self.assertFalse(results['rx_updates'])
+
+
+class FakeResponse(object):
+    def __init__(self, frag_index, obj_data, length=None):
+        self.headers = {
+            'X-Object-Sysmeta-Ec-Frag-Index': str(frag_index),
+            'X-Object-Sysmeta-Ec-Etag': 'the etag',
+            'X-Backend-Timestamp': '1234567890.12345'
+        }
+        self.frag_index = frag_index
+        self.obj_data = obj_data
+        self.data = ''
+        self.length = length
+
+    def init(self, path):
+        if isinstance(self.obj_data, Exception):
+            self.data = self.obj_data
+        else:
+            self.data = self.obj_data[path][self.frag_index]
+
+    def getheaders(self):
+        return self.headers
+
+    def read(self, length):
+        if isinstance(self.data, Exception):
+            raise self.data
+        val = self.data
+        self.data = ''
+        return val if self.length is None else val[:self.length]
+
+
+class TestSsyncECReconstructorSyncJob(TestBaseSsyncEC):
+    def setUp(self):
+        super(TestSsyncECReconstructorSyncJob, self).setUp()
+        self.rx_node_index = 0
+        self.tx_node_index = 1
+
+        # create sender side diskfiles...
+        self.tx_objs = {}
+        tx_df_mgr = self.daemon._df_router[self.policy]
+        t1 = next(self.ts_iter)
+        self.tx_objs['o1'] = self._create_ondisk_files(
+            tx_df_mgr, 'o1', self.policy, t1, (self.tx_node_index,))
+        t2 = next(self.ts_iter)
+        self.tx_objs['o2'] = self._create_ondisk_files(
+            tx_df_mgr, 'o2', self.policy, t2, (self.tx_node_index,))
+
+        self.suffixes = set()
+        for diskfiles in list(self.tx_objs.values()):
+            for df in diskfiles:
+                self.suffixes.add(
+                    os.path.basename(os.path.dirname(df._datadir)))
+
+        self.job_node = dict(self.rx_node)
+        self.job_node['index'] = self.rx_node_index
+
+        self.frag_length = int(
+            self.tx_objs['o1'][0].get_metadata()['Content-Length'])
+
+    def _test_reconstructor_sync_job(self, frag_responses):
+        # Helper method to mock reconstructor to consume given lists of fake
+        # responses while reconstructing a fragment for a sync type job. The
+        # tests verify that when the reconstructed fragment iter fails in some
+        # way then ssync does not mistakenly create fragments on the receiving
+        # node which have incorrect data.
+        # See https://bugs.launchpad.net/swift/+bug/1631144
+
+        # frag_responses is a list of two lists of responses to each
+        # reconstructor GET request for a fragment archive. The two items in
+        # the outer list are lists of responses for each of the two fragments
+        # to be reconstructed. Items in the inner lists are responses for each
+        # of the other fragments fetched during the reconstructor rebuild.
+        path_to_responses = {}
+        fake_get_response_calls = []
+
+        def fake_get_response(recon, node, part, path, headers, policy):
+            # select a list of fake responses for this path and return the next
+            # from the list
+            if path not in path_to_responses:
+                path_to_responses[path] = frag_responses.pop(0)
+            response = path_to_responses[path].pop()
+            # the frag_responses list is in ssync task order, we only know the
+            # path when consuming the responses so initialise the path in the
+            # response now
+            if response:
+                response.init(path)
+            fake_get_response_calls.append(path)
+            return response
+
+        def fake_get_part_nodes(part):
+            # the reconstructor will try to remove the receiver node from the
+            # object ring part nodes, but the fake node we created for our
+            # receiver is not actually in the ring part nodes, so append it
+            # here simply so that the reconstructor does not fail to remove it.
+            return (self.policy.object_ring._get_part_nodes(part) +
+                    [self.job_node])
+
+        with mock.patch(
+                'swift.obj.reconstructor.ObjectReconstructor._get_response',
+                fake_get_response), \
+                mock.patch.object(
+                    self.policy.object_ring, 'get_part_nodes',
+                    fake_get_part_nodes):
+            self.reconstructor = ObjectReconstructor(
+                {}, logger=debug_logger('test_reconstructor'))
+            job = {
+                'device': self.device,
+                'partition': self.partition,
+                'policy': self.policy,
+                'sync_diskfile_builder':
+                    self.reconstructor.reconstruct_fa
+            }
+            sender = ssync_sender.Sender(
+                self.daemon, self.job_node, job, self.suffixes)
+            sender.connect, trace = self.make_connect_wrapper(sender)
+            sender()
+        return trace
+
+    def test_sync_reconstructor_partial_rebuild(self):
+        # First fragment to sync gets partial content from reconstructor.
+        # Expect ssync job to exit early with no file written on receiver.
+        frag_responses = [
+            [FakeResponse(i, self.obj_data, length=-1)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)],
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)]]
+
+        self._test_reconstructor_sync_job(frag_responses)
+        msgs = []
+        for obj_name in ('o1', 'o2'):
+            try:
+                df = self._open_rx_diskfile(
+                    obj_name, self.policy, self.rx_node_index)
+                msgs.append('Unexpected rx diskfile for %r with content %r' %
+                            (obj_name, ''.join([d for d in df.reader()])))
+            except DiskFileNotExist:
+                pass  # expected outcome
+        if msgs:
+            self.fail('Failed with:\n%s' % '\n'.join(msgs))
+        log_lines = self.daemon.logger.get_lines_for_level('error')
+        self.assertIn('Sent data length does not match content-length',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        # trampoline for the receiver to write a log
+        eventlet.sleep(0)
+        log_lines = self.rx_logger.get_lines_for_level('warning')
+        self.assertIn('ssync subrequest failed with 499',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        self.assertFalse(self.rx_logger.get_lines_for_level('error'))
+
+    def test_sync_reconstructor_no_rebuilt_content(self):
+        # First fragment to sync gets no content in any response to
+        # reconstructor. Expect ssync job to exit early with no file written on
+        # receiver.
+        frag_responses = [
+            [FakeResponse(i, self.obj_data, length=0)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)],
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)]]
+
+        self._test_reconstructor_sync_job(frag_responses)
+        msgs = []
+        for obj_name in ('o1', 'o2'):
+            try:
+                df = self._open_rx_diskfile(
+                    obj_name, self.policy, self.rx_node_index)
+                msgs.append('Unexpected rx diskfile for %r with content %r' %
+                            (obj_name, ''.join([d for d in df.reader()])))
+            except DiskFileNotExist:
+                pass  # expected outcome
+        if msgs:
+            self.fail('Failed with:\n%s' % '\n'.join(msgs))
+        log_lines = self.daemon.logger.get_lines_for_level('error')
+        self.assertIn('Sent data length does not match content-length',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        # trampoline for the receiver to write a log
+        eventlet.sleep(0)
+        log_lines = self.rx_logger.get_lines_for_level('warning')
+        self.assertIn('ssync subrequest failed with 499',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        self.assertFalse(self.rx_logger.get_lines_for_level('error'))
+
+    def test_sync_reconstructor_exception_during_rebuild(self):
+        # First fragment to sync has some reconstructor get responses raise
+        # exception while rebuilding. Expect ssync job to exit early with no
+        # files written on receiver.
+        frag_responses = [
+            # ec_ndata responses are ok, but one of these will be ignored as
+            # it is for the frag index being rebuilt
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata)] +
+            # ec_nparity responses will raise an Exception - at least one of
+            # these will be used during rebuild
+            [FakeResponse(i, Exception('raised in response read method'))
+             for i in range(self.policy.ec_ndata,
+                            self.policy.ec_ndata + self.policy.ec_nparity)],
+            # second set of response are all good
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)]]
+
+        self._test_reconstructor_sync_job(frag_responses)
+        msgs = []
+        for obj_name in ('o1', 'o2'):
+            try:
+                df = self._open_rx_diskfile(
+                    obj_name, self.policy, self.rx_node_index)
+                msgs.append('Unexpected rx diskfile for %r with content %r' %
+                            (obj_name, ''.join([d for d in df.reader()])))
+            except DiskFileNotExist:
+                pass  # expected outcome
+        if msgs:
+            self.fail('Failed with:\n%s' % '\n'.join(msgs))
+
+        log_lines = self.reconstructor.logger.get_lines_for_level('error')
+        self.assertIn('Error trying to rebuild', log_lines[0])
+        log_lines = self.daemon.logger.get_lines_for_level('error')
+        self.assertIn('Sent data length does not match content-length',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        # trampoline for the receiver to write a log
+        eventlet.sleep(0)
+        log_lines = self.rx_logger.get_lines_for_level('warning')
+        self.assertIn('ssync subrequest failed with 499',
+                      log_lines[0])
+        self.assertFalse(log_lines[1:])
+        self.assertFalse(self.rx_logger.get_lines_for_level('error'))
+
+    def test_sync_reconstructor_no_responses(self):
+        # First fragment to sync gets no responses for reconstructor to rebuild
+        # with, nothing is sent to receiver so expect to skip that fragment and
+        # continue with second.
+        frag_responses = [
+            [None
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)],
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)]]
+
+        trace = self._test_reconstructor_sync_job(frag_responses)
+        results = self._analyze_trace(trace)
+        self.assertEqual(2, len(results['tx_missing']))
+        self.assertEqual(2, len(results['rx_missing']))
+        self.assertEqual(1, len(results['tx_updates']))
+        self.assertFalse(results['rx_updates'])
+        self.assertEqual('PUT', results['tx_updates'][0].get('method'))
+        synced_obj_path = results['tx_updates'][0].get('path')
+        synced_obj_name = synced_obj_path[-2:]
+
+        msgs = []
+        obj_name = synced_obj_name
+        try:
+            df = self._open_rx_diskfile(
+                obj_name, self.policy, self.rx_node_index)
+            self.assertEqual(
+                self._get_object_data(synced_obj_path,
+                                      frag_index=self.rx_node_index),
+                ''.join([d for d in df.reader()]))
+        except DiskFileNotExist:
+            msgs.append('Missing rx diskfile for %r' % obj_name)
+
+        obj_names = list(self.tx_objs)
+        obj_names.remove(synced_obj_name)
+        obj_name = obj_names[0]
+        try:
+            df = self._open_rx_diskfile(
+                obj_name, self.policy, self.rx_node_index)
+            msgs.append('Unexpected rx diskfile for %r with content %r' %
+                        (obj_name, ''.join([d for d in df.reader()])))
+        except DiskFileNotExist:
+            pass  # expected outcome
+        if msgs:
+            self.fail('Failed with:\n%s' % '\n'.join(msgs))
+        self.assertFalse(self.daemon.logger.get_lines_for_level('error'))
+        log_lines = self.reconstructor.logger.get_lines_for_level('error')
+        self.assertIn('Unable to get enough responses', log_lines[0])
+        # trampoline for the receiver to write a log
+        eventlet.sleep(0)
+        self.assertFalse(self.rx_logger.get_lines_for_level('warning'))
+        self.assertFalse(self.rx_logger.get_lines_for_level('error'))
+
+    def test_sync_reconstructor_rebuild_ok(self):
+        # Sanity test for this class of tests. Both fragments get a full
+        # complement of responses and rebuild correctly.
+        frag_responses = [
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)],
+            [FakeResponse(i, self.obj_data)
+             for i in range(self.policy.ec_ndata + self.policy.ec_nparity)]]
+
+        trace = self._test_reconstructor_sync_job(frag_responses)
+        results = self._analyze_trace(trace)
+        self.assertEqual(2, len(results['tx_missing']))
+        self.assertEqual(2, len(results['rx_missing']))
+        self.assertEqual(2, len(results['tx_updates']))
+        self.assertFalse(results['rx_updates'])
+        msgs = []
+        for obj_name in self.tx_objs:
+            try:
+                df = self._open_rx_diskfile(
+                    obj_name, self.policy, self.rx_node_index)
+                self.assertEqual(
+                    self._get_object_data(df._name,
+                                          frag_index=self.rx_node_index),
+                    ''.join([d for d in df.reader()]))
+            except DiskFileNotExist:
+                msgs.append('Missing rx diskfile for %r' % obj_name)
+        if msgs:
+            self.fail('Failed with:\n%s' % '\n'.join(msgs))
+        self.assertFalse(self.daemon.logger.get_lines_for_level('error'))
+        self.assertFalse(
+            self.reconstructor.logger.get_lines_for_level('error'))
+        # trampoline for the receiver to write a log
+        eventlet.sleep(0)
+        self.assertFalse(self.rx_logger.get_lines_for_level('warning'))
+        self.assertFalse(self.rx_logger.get_lines_for_level('error'))
 
 
 class FakeResponse(object):
@@ -1001,6 +1387,11 @@ class TestSsyncECReconstructorSyncJob(TestBaseSsyncEC):
 
 @patch_policies
 class TestSsyncReplication(TestBaseSsync):
+    def setUp(self):
+        super(TestSsyncReplication, self).setUp()
+        self.daemon = ObjectReplicator(self.daemon_conf,
+                                       debug_logger('test-ssync-sender'))
+
     def test_sync(self):
         policy = POLICIES.default
         rx_node_index = 0
@@ -1010,7 +1401,7 @@ class TestSsyncReplication(TestBaseSsync):
         rx_objs = {}
         tx_tombstones = {}
         rx_tombstones = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
         # o1 and o2 are on tx only
         t1 = next(self.ts_iter)
@@ -1132,7 +1523,7 @@ class TestSsyncReplication(TestBaseSsync):
         rx_objs = {}
         tx_tombstones = {}
         rx_tombstones = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
 
         expected_subreqs = defaultdict(list)
@@ -1277,7 +1668,7 @@ class TestSsyncReplication(TestBaseSsync):
         rx_node_index = 0
 
         # create diskfiles...
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
 
         # rx has data at t1 but no meta
@@ -1362,7 +1753,7 @@ class TestSsyncReplication(TestBaseSsync):
         # create diskfiles...
         tx_objs = {}
         rx_objs = {}
-        tx_df_mgr = self.daemon._diskfile_router[policy]
+        tx_df_mgr = self.daemon._df_router[policy]
         rx_df_mgr = self.rx_controller._diskfile_router[policy]
 
         expected_subreqs = defaultdict(list)

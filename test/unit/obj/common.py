@@ -19,28 +19,38 @@ import tempfile
 import unittest
 import time
 
+from swift.common import utils
 from swift.common.storage_policy import POLICIES
 from swift.common.utils import Timestamp
-from swift.obj import diskfile
-
-from test.unit import debug_logger
 
 
-class FakeReplicator(object):
-    def __init__(self, testdir, policy=None):
-        self.logger = debug_logger('test-ssync-sender')
-        self.conn_timeout = 1
-        self.node_timeout = 2
-        self.http_timeout = 3
-        self.network_chunk_size = 65536
-        self.disk_chunk_size = 4096
-        conf = {
-            'devices': testdir,
-            'mount_check': 'false',
+def write_diskfile(df, timestamp, data='test data', frag_index=None,
+                   commit=True, legacy_durable=False, extra_metadata=None):
+    # Helper method to write some data and metadata to a diskfile.
+    # Optionally do not commit the diskfile, or commit but using a legacy
+    # durable file
+    with df.create() as writer:
+        writer.write(data)
+        metadata = {
+            'ETag': hashlib.md5(data).hexdigest(),
+            'X-Timestamp': timestamp.internal,
+            'Content-Length': str(len(data)),
         }
-        policy = POLICIES.default if policy is None else policy
-        self._diskfile_router = diskfile.DiskFileRouter(conf, self.logger)
-        self._diskfile_mgr = self._diskfile_router[policy]
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        if frag_index is not None:
+            metadata['X-Object-Sysmeta-Ec-Frag-Index'] = str(frag_index)
+        writer.put(metadata)
+        if commit and legacy_durable:
+            # simulate legacy .durable file creation
+            durable_file = os.path.join(df._datadir,
+                                        timestamp.internal + '.durable')
+            with open(durable_file, 'wb'):
+                pass
+        elif commit:
+            writer.commit(timestamp)
+        # else: don't make it durable
+    return metadata
 
 
 def write_diskfile(df, timestamp, data='test data', frag_index=None,
@@ -67,9 +77,18 @@ def write_diskfile(df, timestamp, data='test data', frag_index=None,
 
 class BaseTest(unittest.TestCase):
     def setUp(self):
+        self.device = 'dev'
+        self.partition = '9'
+        self.tmpdir = tempfile.mkdtemp()
+        # sender side setup
+        self.tx_testdir = os.path.join(self.tmpdir, 'tmp_test_ssync_sender')
+        utils.mkdirs(os.path.join(self.tx_testdir, self.device))
+        self.daemon_conf = {
+            'devices': self.tx_testdir,
+            'mount_check': 'false',
+        }
         # daemon will be set in subclass setUp
         self.daemon = None
-        self.tmpdir = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -83,13 +102,12 @@ class BaseTest(unittest.TestCase):
         object_parts = account, container, obj
         timestamp = Timestamp(time.time()) if timestamp is None else timestamp
         if df_mgr is None:
-            df_mgr = self.daemon._diskfile_router[policy]
+            df_mgr = self.daemon._df_router[policy]
         df = df_mgr.get_diskfile(
             device, partition, *object_parts, policy=policy,
             frag_index=frag_index)
         write_diskfile(df, timestamp, data=body, extra_metadata=extra_metadata,
                        commit=commit)
-
         if commit:
             # when we write and commit stub data, sanity check it's readable
             # and not quarantined because of any validation check

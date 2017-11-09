@@ -292,10 +292,12 @@ class TestRingBuilder(unittest.TestCase):
         #   >>> bin(int(struct.pack('!f', 1.0/(33)).encode('hex'), 16))
         #   '0b111100111110000011111000010000'
         rb = ring.RingBuilder(8, 3, 1)
-        for id, (region, zone) in enumerate(11 * [(0, 0), (1, 10), (1, 11)]):
-            rb.add_dev({'id': id, 'region': region, 'zone': zone, 'weight': 1,
-                        'ip': '127.0.0.1', 'port': 10000 + region * 100 + zone,
-                        'device': 'sda%d' % id})
+        for dev_id, (region, zone) in enumerate(
+                11 * [(0, 0), (1, 10), (1, 11)]):
+            rb.add_dev({'id': dev_id, 'region': region, 'zone': zone,
+                        'weight': 1, 'ip': '127.0.0.1',
+                        'port': 10000 + region * 100 + zone,
+                        'device': 'sda%d' % dev_id})
         rb.rebalance()
         self.assertEqual(self._partition_counts(rb, 'zone'),
                          {0: 256, 10: 256, 11: 256})
@@ -756,21 +758,23 @@ class TestRingBuilder(unittest.TestCase):
         expected = defaultdict(int, {0: 256, 1: 256, 2: 86, 3: 85, 4: 85})
         self.assertEqual(expected, self._partition_counts(rb, key='zone'))
 
-        parts_with_moved_count = defaultdict(int)
+        zone_histogram = defaultdict(int)
         for part in range(rb.parts):
-            zones = set()
-            for replica in range(rb.replicas):
-                zones.add(rb.devs[rb._replica2part2dev[replica][part]]['zone'])
-            moved_replicas = len(zones - {0, 1})
-            parts_with_moved_count[moved_replicas] += 1
+            zones = [
+                rb.devs[rb._replica2part2dev[replica][part]]['zone']
+                for replica in range(rb.replicas)]
+            zone_histogram[tuple(sorted(zones))] += 1
 
         # We expect that every partition moved exactly one replica
-        expected = {1: 256}
-        self.assertEqual(parts_with_moved_count, expected)
+        expected = {
+            (0, 1, 2): 86,
+            (0, 1, 3): 85,
+            (0, 1, 4): 85,
+        }
+        self.assertEqual(zone_histogram, expected)
 
-        # After rebalancing two more times, we expect that everything is in a
+        # After rebalancing one more times, we expect that everything is in a
         # good state
-        rb.rebalance(seed=3)
         rb.rebalance(seed=3)
 
         self.assertEqual(0, rb.dispersion)

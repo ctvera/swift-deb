@@ -317,35 +317,44 @@ EC archives are stored on disk in their respective objects-N directory based on
 their policy index.  See :doc:`overview_policies` for details on per policy
 directory information.
 
-The actual names on disk of EC archives also have one additional piece of data
-encoded in the filename, the fragment archive index.
+In addition to the object timestamp, the filenames of EC archives encode other
+information related to the archive:
 
-Each storage policy now must include a transformation function that diskfile
-will use to build the filename to store on disk. The functions are implemented
-in the diskfile module as policy specific sub classes ``DiskFileManager``.
+* The fragment archive index. This is required for a few reasons. For one, it
+  allows us to store fragment archives of different indexes on the same storage
+  node which is not typical however it is possible in many circumstances.
+  Without unique filenames for the different EC archive files in a set, we
+  would be at risk of overwriting one archive of index `n` with another of
+  index `m` in some scenarios.
 
-This is required for a few reasons. For one, it allows us to store fragment
-archives of different indexes on the same storage node which is not typical
-however it is possible in many circumstances. Without unique filenames for the
-different EC archive files in a set, we would be at risk of overwriting one
-archive of index n with another of index m in some scenarios.
-
-The transformation function for the replication policy is simply a NOP. For
-reconstruction, the index is appended to the filename just before the .data
-extension. An example filename for a fragment archive storing the 5th fragment
-would like this this::
+  The index is appended to the filename just before the ``.data`` extension.
+  For example, the filename for a fragment archive storing the 5th fragment
+  would be::
 
     1418673556.92690#5.data
 
-An additional file is also included for Erasure Code policies called the
-``.durable`` file. Its meaning will be covered in detail later, however, its on-
-disk format does not require the name transformation function that was just
-covered.  The .durable for the example above would simply look like this::
+* The durable state of the archive. The meaning of this will be described in
+  more detail later, but a fragment archive that is considered durable has an
+  additional ``#d`` string included in its filename immediately before the
+  ``.data`` extension. For example::
 
-    1418673556.92690.durable
+    1418673556.92690#5#d.data
 
-And it would be found alongside every fragment specific .data file following a
-100% successful PUT operation.
+A policy-specific transformation function is therefore used to build the
+archive filename. These functions are implemented in the diskfile module as
+methods of policy specific sub classes of ``BaseDiskFileManager``.
+
+The transformation function for the replication policy is simply a NOP.
+
+.. note::
+
+    In older versions the durable state of an archive was represented by an
+    additional file called the ``.durable`` file instead of the ``#d``
+    substring in the ``.data`` filename. The ``.durable`` for the example above
+    would be::
+
+        1418673556.92690.durable
+
 
 Proxy Server
 ------------
@@ -393,21 +402,31 @@ communicate back to the storage nodes once it has confirmation that a quorum of
 fragment archives in the set have been written.
 
 For the first phase of the conversation the proxy requires a quorum of
-`ec_ndata + 1` fragment archives to be successfully put to storage nodes.
-This ensures that the object could still be reconstructed even if one of the
-fragment archives becomes unavailable. During the second phase of the
-conversation the proxy communicates a confirmation to storage nodes that the
-fragment archive quorum has been achieved. This causes the storage node to
-create a `ts.durable` file at timestamp `ts` which acts as an indicator of
-the last known durable set of fragment archives for a given object. The
-presence of a `ts.durable` file means, to the object server, `there is a set
-of ts.data files that are durable at timestamp ts`.
+`ec_ndata + 1` fragment archives to be successfully put to storage nodes. This
+ensures that the object could still be reconstructed even if one of the
+fragment archives becomes unavailable. As described above, each fragment
+archive file is named::
+
+    <ts>#<frag_index>.data
+
+where ``ts`` is the timestamp and ``frag_index`` is the fragment archive index.
+
+During the second phase of the conversation the proxy communicates a
+confirmation to storage nodes that the fragment archive quorum has been
+achieved. This causes each storage node to rename the fragment archive written
+in the first phase of the conversation to include the substring ``#d`` in its
+name::
+
+    <ts>#<frag_index>#d.data
+
+This indicates to the object server that this fragment archive is `durable` and
+that there is a set of data files that are durable at timestamp ``ts``.
 
 For the second phase of the conversation the proxy requires a quorum of
 `ec_ndata + 1` successful commits on storage nodes. This ensures that there are
 sufficient committed fragment archives for the object to be reconstructed even
-if one becomes unavailable. The reconstructor ensures that `.durable` files are
-replicated on storage nodes where they may be missing.
+if one becomes unavailable. The reconstructor ensures that the durable state is
+replicated on storage nodes where it may be missing.
 
 Note that the completion of the commit phase of the conversation
 is also a signal for the object server to go ahead and immediately delete older
@@ -423,9 +442,9 @@ The basic flow looks like this:
    data/metadata write, send a 1st-phase response to proxy.
  * Upon quorum of storage nodes responses, the proxy initiates 2nd-phase by
    sending commit confirmations to object servers.
- * Upon receipt of commit message, object servers store a 0-byte data file as
-   `<timestamp>.durable` indicating successful PUT, and send a final response to
-   the proxy server.
+ * Upon receipt of commit message, object servers rename ``.data`` files to
+   include the ``#d`` substring, indicating successful PUT, and send a final
+   response to the proxy server.
  * The proxy waits for `ec_ndata + 1` object servers to respond with a
    success (2xx) status before responding to the client with a successful
    status.
@@ -446,24 +465,25 @@ Here is a high level example of what the conversation looks like::
          Content-MD5: <footer_meta_cksum>
          <footer_meta>
          --MIMEboundary
-    <object server writes data, metadata>
+    <object server writes data, metadata to <ts>#<frag_index>.data file>
     obj:   100 Continue
     <quorum>
     proxy: X-Document: put commit
          commit_confirmation
          --MIMEboundary--
-    <object server writes ts.durable state>
+    <object server renames <ts>#<frag_index>.data to <ts>#<frag_index>#d.data>
     obj:   20x
     <proxy waits to receive >=2 2xx responses>
     proxy: 2xx -> client
 
-A few key points on the .durable file:
+A few key points on the durable state of a fragment archive:
 
-* The .durable file means \"the matching .data file for this has sufficient
-  fragment archives somewhere, committed, to reconstruct the object\".
+* A durable fragment archive means that there exist sufficient other fragment
+  archives elsewhere in the cluster (durable and/or non-durable) to reconstruct
+  the object.
 * When a proxy does a GET, it will require at least one object server to
-  respond with a fragment archive that has a matching `.durable` file before
-  reconstructing and returning the object to the client.
+  respond with a fragment archive is durable before reconstructing and
+  returning the object to the client.
 
 Partial PUT Failures
 ====================
@@ -471,10 +491,9 @@ Partial PUT Failures
 A partial PUT failure has a few different modes.  In one scenario the Proxy
 Server is alive through the entire PUT conversation.  This is a very
 straightforward case. The client will receive a good response if and only if a
-quorum of fragment archives were successfully landed on their storage nodes.  In
-this case the Reconstructor will discover the missing fragment archives, perform
-a reconstruction and deliver fragment archives and their matching .durable files
-to the nodes.
+quorum of fragment archives were successfully landed on their storage nodes.
+In this case the Reconstructor will discover the missing fragment archives,
+perform a reconstruction and deliver those fragment archives to their nodes.
 
 The more interesting case is what happens if the proxy dies in the middle of a
 conversation.  If it turns out that a quorum had been met and the commit phase
@@ -499,7 +518,7 @@ implement the high level steps described earlier:
 #. The proxy server makes simultaneous requests to `ec_ndata` primary object
    server nodes with goal of finding a set of `ec_ndata` distinct EC archives
    at the same timestamp, and an indication from at least one object server
-   that a `<timestamp>.durable` file exists for that timestamp. If this goal is
+   that a durable fragment archive exists for that timestamp. If this goal is
    not achieved with the first `ec_ndata` requests then the proxy server
    continues to issue requests to the remaining primary nodes and then handoff
    nodes.
@@ -510,12 +529,12 @@ implement the high level steps described earlier:
    response since each EC archive's metadata is valid only for that archive.
 #. The proxy streams the decoded data it has back to the client.
 
-Note that the proxy does not require all objects servers to have a `.durable`
-file for the EC archive that they return in response to a GET. The proxy
-will be satisfied if just one object server has a `.durable` file at the same
-timestamp as EC archives returned from other object servers. This means
-that the proxy can successfully GET an object that had missing `.durable` files
-when it was PUT (i.e. a partial PUT failure occurred).
+Note that the proxy does not require all objects servers to have a durable
+fragment archive to return in response to a GET. The proxy will be satisfied if
+just one object server has a durable fragment archive at the same timestamp as
+EC archives returned from other object servers. This means that the proxy can
+successfully GET an object that had missing durable state on some nodes when it
+was PUT (i.e. a partial PUT failure occurred).
 
 Note also that an object server may inform the proxy server that it has more
 than one EC archive for different timestamps and/or fragment indexes, which may
@@ -541,12 +560,11 @@ which includes things like the entire object etag.
 DiskFile
 ========
 
-Erasure code uses subclassed ``ECDiskFile``, ``ECDiskFileWriter``,
+Erasure code policies use subclassed ``ECDiskFile``, ``ECDiskFileWriter``,
 ``ECDiskFileReader`` and ``ECDiskFileManager`` to implement EC specific
 handling of on disk files.  This includes things like file name manipulation to
-include the fragment index in the filename, determination of valid .data files
-based on .durable presence, construction of EC specific hashes.pkl file to
-include fragment index information, etc., etc.
+include the fragment index and durable state in the filename, construction of
+EC specific ``hashes.pkl`` file to include fragment index information, etc.
 
 Metadata
 --------
@@ -583,7 +601,7 @@ The Reconstructor
 
 The Reconstructor performs analogous functions to the replicator:
 
-#. Recovery from disk drive failure.
+#. Recovering from disk drive failure.
 #. Moving data around because of a rebalance.
 #. Reverting data back to a primary from a handoff.
 #. Recovering fragment archives from bit rot discovered by the auditor.
@@ -594,14 +612,14 @@ of the key elements in understanding how the reconstructor operates.
 Unlike the replicator, the work that the reconstructor does is not always as
 easy to break down into the 2 basic tasks of synchronize or revert (move data
 from handoff back to primary) because of the fact that one storage node can
-house fragment archives of various indexes and each index really /"belongs/" to
+house fragment archives of various indexes and each index really \"belongs\" to
 a different node.  So, whereas when the replicator is reverting data from a
 handoff it has just one node to send its data to, the reconstructor can have
-several.  Additionally, its not always the case that the processing of a
-particular suffix directory means one or the other for the entire directory (as
-it does for replication). The scenarios that create these mixed situations can
-be pretty complex so we will just focus on what the reconstructor does here and
-not a detailed explanation of why.
+several.  Additionally, it is not always the case that the processing of a
+particular suffix directory means one or the other job type for the entire
+directory (as it does for replication). The scenarios that create these mixed
+situations can be pretty complex so we will just focus on what the
+reconstructor does here and not a detailed explanation of why.
 
 Job Construction and Processing
 ===============================
@@ -609,29 +627,31 @@ Job Construction and Processing
 Because of the nature of the work it has to do as described above, the
 reconstructor builds jobs for a single job processor.  The job itself contains
 all of the information needed for the processor to execute the job which may be
-a synchronization or a data reversion and there may be a mix of jobs that
+a synchronization or a data reversion.  There may be a mix of jobs that
 perform both of these operations on the same suffix directory.
 
-Jobs are constructed on a per partition basis and then per fragment index basis.
+Jobs are constructed on a per-partition basis and then per-fragment-index basis.
 That is, there will be one job for every fragment index in a partition.
 Performing this construction \"up front\" like this helps minimize the
 interaction between nodes collecting hashes.pkl information.
 
 Once a set of jobs for a partition has been constructed, those jobs are sent off
 to threads for execution. The single job processor then performs the necessary
-actions working closely with ssync to carry out its instructions.  For data
+actions, working closely with ssync to carry out its instructions.  For data
 reversion, the actual objects themselves are cleaned up via the ssync module and
 once that partition's set of jobs is complete, the reconstructor will attempt to
 remove the relevant directory structures.
 
-The scenarios that job construction has to take into account include:
+Job construction must account for a variety of scenarios, including:
 
 #. A partition directory with all fragment indexes matching the local node
    index.  This is the case where everything is where it belongs and we just
-   need to compare hashes and sync if needed, here we sync with our partners.
-#. A partition directory with one local fragment index and mix of others.  Here
-   we need to sync with our partners where fragment indexes matches the
-   local_id, all others are sync'd with their home nodes and then deleted.
+   need to compare hashes and sync if needed. Here we simply sync with our
+   partners.
+#. A partition directory with at least one local fragment index and mix of
+   others.  Here we need to sync with our partners where fragment indexes
+   matches the local_id, all others are sync'd with their home nodes and then
+   deleted.
 #. A partition directory with no local fragment index and just one or more of
    others. Here we sync with just the home nodes for the fragment indexes that
    we have and then all the local archives are deleted.  This is the basic
@@ -670,13 +690,13 @@ basic reconstruction which, at a high level, looks like this:
 * Update the etag and fragment index metadata elements of the newly constructed
   fragment archive.
 * Establish a connection to the target nodes and give ssync a DiskFileLike class
-  that it can stream data from.
+  from which it can stream data.
 
 The reader in this class gathers fragments from the nodes and uses PyECLib to
 reconstruct each segment before yielding data back to ssync. Essentially what
 this means is that data is buffered, in memory, on a per segment basis at the
 node performing reconstruction and each segment is dynamically reconstructed and
-delivered to `ssync_sender` where the `send_put()` method will ship them on
+delivered to ``ssync_sender`` where the ``send_put()`` method will ship them on
 over.  The sender is then responsible for deleting the objects as they are sent
 in the case of data reversion.
 
