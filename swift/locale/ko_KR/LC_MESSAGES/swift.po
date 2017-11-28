@@ -132,10 +132,6 @@ msgid "Account"
 msgstr "계정"
 
 #, python-format
-msgid "Account %(account)s has not been reaped since %(time)s"
-msgstr "계정 %(account)s을(를) %(time)s 이후에 얻지 못함"
-
-#, python-format
 msgid "Account audit \"once\" mode completed: %.02fs"
 msgstr "계정 감사 \"한 번\"모드가 완료: %.02fs"
 
@@ -148,18 +144,6 @@ msgid ""
 "Attempted to replicate %(count)d dbs in %(time).5f seconds (%(rate).5f/s)"
 msgstr ""
 "%(time).5f초(%(rate).5f/s)에 %(count)d개의 데이터베이스를 복제하려고 함"
-
-#, python-format
-msgid "Audit Failed for %(path)s: %(err)s"
-msgstr "검사 중 오류  %(path)s: %(err)s"
-
-#, python-format
-msgid "Audit passed for %s"
-msgstr "검사 성공 %s"
-
-#, python-format
-msgid "Bad key for %(name)r: %(err)s"
-msgstr "%(name)r에 잘못된 키가 있음: %(err)s"
 
 #, python-format
 msgid "Bad rsync return code: %(ret)d <- %(args)s"
@@ -186,10 +170,6 @@ msgstr "컨테이너 업데이트 단일 스레드 스윕 시작"
 msgid "Begin container update sweep"
 msgstr "컨테이너 업데이트 스윕 시작"
 
-#, python-format
-msgid "Begin object audit \"%(mode)s\" mode (%(audi_type)s%(description)s)"
-msgstr "오브젝트 감사 \"%(mode)s\" 모드(%(audi_type)s%(description)s) 시작"
-
 msgid "Begin object update single threaded sweep"
 msgstr "오브젝트 업데이트 단일 스레드 스윕 시작"
 
@@ -213,14 +193,6 @@ msgstr "파일 %s에 액세스할 수 없습니다."
 #, python-format
 msgid "Can not load profile data from %s."
 msgstr "%s에서 프로파일 데이터를 로드할 수 없습니다."
-
-#, python-format
-msgid "Cannot read %(auditor_status)s (%(err)s)"
-msgstr "%(auditor_status)s을(를) 읽을 수 없음(%(err)s)"
-
-#, python-format
-msgid "Cannot write %(auditor_status)s (%(err)s)"
-msgstr "%(auditor_status)s을(를) 쓸 수 없음(%(err)s)"
 
 #, python-format
 msgid "Client did not read from proxy within %ss"
@@ -291,32 +263,12 @@ msgstr ""
 "%(fail)s개 실패, %(no_change)s개 변경 없음"
 
 #, python-format
-msgid "Could not autocreate account %r"
-msgstr "%r 계정을 자동 생성하지 못하였습니다."
-
-#, python-format
-msgid ""
-"Could not bind to %(addr)s:%(port)s after trying for %(timeout)s seconds"
-msgstr "%(timeout)s초 동안 시도한 후 %(addr)s:%(port)s에 바인드할 수 없음"
-
-#, python-format
-msgid "Could not load %(conf)r: %(error)s"
-msgstr "%(conf)r을(를) 로드할 수 없음 : %(error)s"
-
-#, python-format
 msgid "Data download error: %s"
 msgstr "데이터 다운로드 오류: %s"
 
 #, python-format
 msgid "Devices pass completed: %.02fs"
 msgstr "장치 패스 완료 : %.02fs"
-
-msgid "Did not get a keys dict"
-msgstr "키 사전을 받아올 수 없습니다."
-
-#, python-format
-msgid "Directory %(directory)r does not map to a valid policy (%(error)s)"
-msgstr "%(directory)r 디렉토리가 올바른 정책에 맵핑되지 않음(%(error)s)"
 
 #, python-format
 msgid "ERROR %(db_file)s: %(validate_sync_to_err)s"
@@ -341,14 +293,6 @@ msgid ""
 msgstr ""
 "오류. %(ip)s:%(port)s/%(device)s(으)로 계정 업데이트 실패(나중에 다시 시도): "
 "응답 %(status)s %(reason)s"
-
-#, python-format
-msgid ""
-"ERROR Account update failed: different  numbers of hosts and devices in "
-"request: \"%(hosts)s\" vs \"%(devices)s\""
-msgstr ""
-"오류. 계정 업데이트 실패: 다음 요청에서 호스트 및 디바이스 수가 서로 다름: "
-"\"%(hosts)s\" 대 \"%(devices)s\""
 
 #, python-format
 msgid "ERROR Bad response %(status)s from %(host)s"
@@ -455,13 +399,6 @@ msgstr ""
 "오류. %(ip)s:%(port)s/%(dev)s(으)로 컨테이너 업데이트 실패(이후 비동기 업데이"
 "트용으로 저장)"
 
-msgid "ERROR get_keys() missing callback"
-msgstr "오류 get_keys()에 콜백이 없습니다."
-
-#, python-format
-msgid "ERROR get_keys(): from callback: %s"
-msgstr "오류 get_keys(): 콜백으로 부터 : %s"
-
 #, python-format
 msgid "ERROR reading HTTP response from %s"
 msgstr "%s에서 HTTP 응답을 읽는 중 오류 발생"
@@ -517,35 +454,11 @@ msgid "Error %(action)s to memcached: %(server)s"
 msgstr "memcached에 대한 %(action)s 오류: %(server)s"
 
 #, python-format
-msgid "Error decrypting %(resp_type)s: %(reason)s"
-msgstr "오류 %(resp_type)s 복호화 중 : %(reason)s"
-
-#, python-format
-msgid "Error decrypting %(resp_type)s: Missing %(key)s"
-msgstr "오류 %(resp_type)s 복호화 중 : %(key)s이(가) 없음"
-
-#, python-format
-msgid "Error decrypting container listing: %s"
-msgstr "오류 컨테이너 리스닝 복호화 중 : %s"
-
-#, python-format
-msgid "Error decrypting header %(header)s: %(error)s"
-msgstr "오류 복호화 헤더 %(header)s : %(error)s"
-
-#, python-format
-msgid "Error decrypting object: %s"
-msgstr "오류 객체 복호화 중 : %s"
-
-#, python-format
 msgid "Error encoding to UTF-8: %s"
 msgstr "UTF-8: %s 으로 변환 오류"
 
 msgid "Error hashing suffix"
 msgstr "접미부를 해싱하는 중 오류 발생"
-
-#, python-format
-msgid "Error in %(conf)r with mtime_check_interval: %(error)s"
-msgstr "%(conf)r에서 mtime_check_interval 오류 발생: %(error)s"
 
 #, python-format
 msgid "Error limiting server %s"
@@ -692,23 +605,12 @@ msgstr "shift_bytes가 올바르지 않습니다."
 msgid "Killing long-running rsync: %s"
 msgstr "장기 실행 중인 rsync 강제 종료: %s"
 
-#, python-format
-msgid "Loading JSON from %(auditor_status)s failed (%(err)s)"
-msgstr "%(auditor_status)s에서 JSON 로드 실패(%(err)s)"
-
 msgid "Lockup detected.. killing live coros."
 msgstr "잠금 발견.. 활성 coros를 강제 종료합니다."
 
 #, python-format
 msgid "Mapped %(given_domain)s to %(found_domain)s"
 msgstr "%(given_domain)s을(를) %(found_domain)s(으)로 맵핑함"
-
-msgid "More than one part in a single-part response?"
-msgstr "single-part에서 하나 이상의 응답 파트가 존재 합니까?"
-
-#, python-format
-msgid "Missing key for %r"
-msgstr "%r에 대한 키가 없음"
 
 msgid "More than one part in a single-part response?"
 msgstr "single-part에서 하나 이상의 응답 파트가 존재 합니까?"
@@ -732,10 +634,6 @@ msgstr "인덱스가 %s인 정책이 없음"
 #, python-format
 msgid "No realm key for %r"
 msgstr "%r에 대한 영역 키가 없음"
-
-#, python-format
-msgid "No space left on device for %(file)s (%(err)s)"
-msgstr "%(file)s를 저장할 디스크 공간이 없음. (%(err)s)"
 
 #, python-format
 msgid "Node error limited %(ip)s:%(port)s (%(device)s)"
@@ -854,21 +752,12 @@ msgid "Path required in X-Container-Sync-To"
 msgstr "X-Container-Sync-To에 경로가 필요함"
 
 #, python-format
-msgid "Pipeline was modified. New pipeline is \"%s\"."
-msgstr "파이프라인이 수정되었습니다. 새로운 파이프라인은 \"%s\" 입니다."
-
-#, python-format
 msgid "Problem cleaning up %s"
 msgstr "%s 정리 문제 발생"
 
 #, python-format
 msgid "Profiling Error: %s"
 msgstr "프로파일링 오류: %s"
-
-#, python-format
-msgid "Quarantined %(db_dir)s to %(quar_path)s due to %(exc_hint)s database"
-msgstr ""
-"%(db_dir)s 을(를) %(quar_path)s에 격리. 원인 : %(exc_hint)s 데이터베이스"
 
 #, python-format
 msgid "Quarantined %(hsh_path)s to %(quar_path)s because it is not a directory"
@@ -944,10 +833,6 @@ msgid "Running object replicator in script mode."
 msgstr "오브젝트 복제자를 스크립트 모드로 실행 중입니다."
 
 #, python-format
-msgid "Signal %(server)s  pid: %(pid)s  signal: %(signal)s"
-msgstr "신호 %(server)s  pid: %(pid)s  신호: %(signal)s"
-
-#, python-format
 msgid ""
 "Since %(time)s: %(sync)s synced [%(delete)s deletes, %(put)s puts], %(skip)s "
 "skipped, %(fail)s failed"
@@ -974,10 +859,6 @@ msgstr "%(err)s에 의해 %(datadir)s 건너뛰어 지는 중."
 #, python-format
 msgid "Skipping %(device)s as it is not mounted"
 msgstr "마운트되지 않았으므로 %(device)s을(를) 건너뜀"
-
-#, python-format
-msgid "Skipping %(dir)s: %(err)s"
-msgstr "%(err)s에 의해 %(dir)s 건너뛰어 지는 중."
 
 #, python-format
 msgid "Skipping %s as it is not mounted"
@@ -1023,10 +904,6 @@ msgid "Timeout Exception with %(ip)s:%(port)s/%(device)s"
 msgstr "%(ip)s:%(port)s/%(device)s에서 제한시간 초과 예외 발생"
 
 #, python-format
-msgid "Timeout fetching fragments for %r"
-msgstr "%r 의 조각을 가져오는 동안 타임아웃이 발생하였습니다."
-
-#, python-format
 msgid "Trying to %(method)s %(path)s"
 msgstr "%(method)s %(path)s 시도 중"
 
@@ -1065,10 +942,6 @@ msgstr "libc에서 %s을(를) 찾을 수 없습니다. no-op로 남겨 둡니다
 #, python-format
 msgid "Unable to locate config for %s"
 msgstr "%s의 구성을 찾을 수 없음"
-
-#, python-format
-msgid "Unable to locate config number %(number)s for %(server)s"
-msgstr "구성 번호 %(number)s을(를) 찾을 수 없음(대상: %(server)s)"
 
 msgid ""
 "Unable to locate fallocate, posix_fallocate in libc.  Leaving as a no-op."
@@ -1144,10 +1017,6 @@ msgstr ""
 
 msgid "Warning: Cannot ratelimit without a memcached client"
 msgstr "경고: memcached 클라이언트 없이 전송률을 제한할 수 없음"
-
-#, python-format
-msgid "autocreate account %r"
-msgstr "%r 계정이 자동 생성되었습니다."
 
 #, python-format
 msgid "method %s is not allowed."

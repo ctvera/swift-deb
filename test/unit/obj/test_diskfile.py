@@ -5741,22 +5741,6 @@ class TestSuffixHashes(unittest.TestCase):
             if suffix_dir != suffix_dir2:
                 return df2
 
-    def get_different_suffix_df(self, df, **kwargs):
-        # returns diskfile in the same partition with different suffix
-        suffix_dir = os.path.dirname(df._datadir)
-        for i in itertools.count():
-            df2 = df._manager.get_diskfile(
-                df._device_path,
-                df._datadir.split('/')[-3],
-                df._account,
-                df._container,
-                'o%d' % i,
-                policy=df.policy,
-                **kwargs)
-            suffix_dir2 = os.path.dirname(df2._datadir)
-            if suffix_dir != suffix_dir2:
-                return df2
-
     def check_cleanup_ondisk_files(self, policy, input_files, output_files):
         orig_unlink = os.unlink
         file_list = list(input_files)

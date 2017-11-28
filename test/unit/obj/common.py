@@ -53,28 +53,6 @@ def write_diskfile(df, timestamp, data='test data', frag_index=None,
     return metadata
 
 
-def write_diskfile(df, timestamp, data='test data', frag_index=None,
-                   commit=True, extra_metadata=None):
-    # Helper method to write some data and metadata to a diskfile.
-    # Optionally do not commit the diskfile
-    with df.create() as writer:
-        writer.write(data)
-        metadata = {
-            'ETag': hashlib.md5(data).hexdigest(),
-            'X-Timestamp': timestamp.internal,
-            'Content-Length': str(len(data)),
-        }
-        if extra_metadata:
-            metadata.update(extra_metadata)
-        if frag_index is not None:
-            metadata['X-Object-Sysmeta-Ec-Frag-Index'] = str(frag_index)
-        writer.put(metadata)
-        if commit:
-            writer.commit(timestamp)
-        # else: don't make it durable
-    return metadata
-
-
 class BaseTest(unittest.TestCase):
     def setUp(self):
         self.device = 'dev'
