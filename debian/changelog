@@ -1,3 +1,9 @@
+swift (2.13.1-2) unstable; urgency=medium
+
+  * Fix python-swift.postinst script to create directories with correct rights
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 28 Nov 2017 15:29:23 +0100
+
 swift (2.13.1-1) unstable; urgency=medium
 
   * New upstream version

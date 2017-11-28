@@ -15,6 +15,12 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	mkdir -p /var/cache/swift
 	chown swift:swift /var/cache/swift
 	chmod 2770 /var/cache/swift
+        
+	# we need few folders with correct rights.
+        mkdir -p /var/lib/swift
+        mkdir -p /var/log/swift
+        chown swift:swift /var/lib/swift
+        chown swift:adm /var/log/swift
 fi
 
 #DEBHELPER#
