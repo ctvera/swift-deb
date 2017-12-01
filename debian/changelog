@@ -5,6 +5,7 @@ swift (2.16.0-1) UNRELEASED; urgency=medium
   * d/patches/Be_more_tolerant_of_exception_messages_from_sqlite.patch:
     Remove, applied upstream
   * Rebased all patches
+  * Remove bin/swift-temp-url
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 01 Dec 2017 10:37:04 +0100
 
