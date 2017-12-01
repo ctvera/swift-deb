@@ -31,7 +31,7 @@ To build documentation install sphinx (``pip install sphinx``), run
 ``python setup.py build_sphinx``, and then browse to
 /doc/build/html/index.html. These docs are auto-generated after every
 commit and available online at
-http://docs.openstack.org/developer/swift/.
+https://docs.openstack.org/swift/latest/.
 
 For Developers
 --------------
@@ -39,13 +39,14 @@ For Developers
 Getting Started
 ~~~~~~~~~~~~~~~
 
-Swift is part of OpenStack and follows the code contribution, review, and testing processes common to all OpenStack projects.
+Swift is part of OpenStack and follows the code contribution, review, and
+testing processes common to all OpenStack projects.
 
 If you would like to start contributing, check out these
 `notes <CONTRIBUTING.rst>`__ to help you get started.
 
 The best place to get started is the
-`"SAIO - Swift All In One" <http://docs.openstack.org/developer/swift/development_saio.html>`__.
+`"SAIO - Swift All In One" <https://docs.openstack.org/swift/latest/development_saio.html>`__.
 This document will walk you through setting up a development cluster of
 Swift in a VM. The SAIO environment is ideal for running small-scale
 tests against swift and trying out new features and bug fixes.
@@ -72,7 +73,7 @@ continue to work.
 
 Probe tests are "white box" tests that validate the internal workings of a
 Swift cluster. They are written to work against the
-`"SAIO - Swift All In One" <http://docs.openstack.org/developer/swift/development_saio.html>`__
+`"SAIO - Swift All In One" <https://docs.openstack.org/swift/latest/development_saio.html>`__
 dev environment. For example, a probe test may create an object, delete one
 replica, and ensure that the background consistency processes find and correct
 the error.
@@ -80,6 +81,12 @@ the error.
 You can run unit tests with ``.unittests``, functional tests with
 ``.functests``, and probe tests with ``.probetests``. There is an
 additional ``.alltests`` script that wraps the other three.
+
+To fully run the tests, the target environment must use a filesystem that
+supports large xattrs. XFS is strongly recommended. For unit tests and in-
+process functional tests, either mount ``/tmp`` with XFS or provide another
+XFS filesystem via the ``TMPDIR`` environment variable. Without this setting,
+tests should still pass, but a very large number will be skipped.
 
 Code Organization
 ~~~~~~~~~~~~~~~~~
@@ -119,10 +126,9 @@ For Deployers
 -------------
 
 Deployer docs are also available at
-http://docs.openstack.org/developer/swift/. A good starting point is at
-http://docs.openstack.org/developer/swift/deployment_guide.html
-
-There is an `ops runbook <http://docs.openstack.org/developer/swift/ops_runbook/>`__
+https://docs.openstack.org/swift/latest/. A good starting point is at
+https://docs.openstack.org/swift/latest/deployment_guide.html
+There is an `ops runbook <https://docs.openstack.org/swift/latest/ops_runbook/index.html>`__
 that gives information about how to diagnose and troubleshoot common issues
 when running a Swift cluster.
 
@@ -138,11 +144,11 @@ For client applications, official Python language bindings are provided
 at http://github.com/openstack/python-swiftclient.
 
 Complete API documentation at
-http://developer.openstack.org/api-ref/object-store/
+https://developer.openstack.org/api-ref/object-store/
 
 There is a large ecosystem of applications and libraries that support and
 work with OpenStack Swift. Several are listed on the
-`associated projects <http://docs.openstack.org/developer/swift/associated_projects.html>`__
+`associated projects <https://docs.openstack.org/swift/latest/associated_projects.html>`__
 page.
 
 --------------

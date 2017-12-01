@@ -49,7 +49,6 @@ import json
 import logging
 import time
 from bisect import bisect
-from swift import gettext_ as _
 from hashlib import md5
 
 from eventlet.green import socket
@@ -163,10 +162,13 @@ class MemcacheRing(object):
     def _exception_occurred(self, server, e, action='talking',
                             sock=None, fp=None, got_connection=True):
         if isinstance(e, Timeout):
-            logging.error(_("Timeout %(action)s to memcached: %(server)s"),
+            logging.error("Timeout %(action)s to memcached: %(server)s",
                           {'action': action, 'server': server})
+        elif isinstance(e, (socket.error, MemcacheConnectionError)):
+            logging.error("Error %(action)s to memcached: %(server)s: %(err)s",
+                          {'action': action, 'server': server, 'err': e})
         else:
-            logging.exception(_("Error %(action)s to memcached: %(server)s"),
+            logging.exception("Error %(action)s to memcached: %(server)s",
                               {'action': action, 'server': server})
         try:
             if fp:
@@ -191,7 +193,7 @@ class MemcacheRing(object):
                                     if err > now - ERROR_LIMIT_TIME]
             if len(self._errors[server]) > ERROR_LIMIT_COUNT:
                 self._error_limited[server] = now + ERROR_LIMIT_DURATION
-                logging.error(_('Error limiting server %s'), server)
+                logging.error('Error limiting server %s', server)
 
     def _get_conns(self, key):
         """
@@ -281,7 +283,11 @@ class MemcacheRing(object):
                 with Timeout(self._io_timeout):
                     sock.sendall('get %s\r\n' % key)
                     line = fp.readline().strip().split()
-                    while line[0].upper() != 'END':
+                    while True:
+                        if not line:
+                            raise MemcacheConnectionError('incomplete read')
+                        if line[0].upper() == 'END':
+                            break
                         if line[0].upper() == 'VALUE' and line[1] == key:
                             size = int(line[3])
                             value = fp.read(size)
@@ -327,6 +333,8 @@ class MemcacheRing(object):
                 with Timeout(self._io_timeout):
                     sock.sendall('%s %s %s\r\n' % (command, key, delta))
                     line = fp.readline().strip().split()
+                    if not line:
+                        raise MemcacheConnectionError('incomplete read')
                     if line[0].upper() == 'NOT_FOUND':
                         add_val = delta
                         if command == 'decr':
@@ -442,7 +450,11 @@ class MemcacheRing(object):
                     sock.sendall('get %s\r\n' % ' '.join(keys))
                     line = fp.readline().strip().split()
                     responses = {}
-                    while line[0].upper() != 'END':
+                    while True:
+                        if not line:
+                            raise MemcacheConnectionError('incomplete read')
+                        if line[0].upper() == 'END':
+                            break
                         if line[0].upper() == 'VALUE':
                             size = int(line[3])
                             value = fp.read(size)

@@ -268,21 +268,21 @@ class TestMatch(unittest.TestCase):
     def test_match(self):
         match = swift.common.swob.Match('"a", "b"')
         self.assertEqual(match.tags, set(('a', 'b')))
-        self.assertTrue('a' in match)
-        self.assertTrue('b' in match)
+        self.assertIn('a', match)
+        self.assertIn('b', match)
         self.assertNotIn('c', match)
 
     def test_match_star(self):
         match = swift.common.swob.Match('"a", "*"')
-        self.assertTrue('a' in match)
-        self.assertTrue('b' in match)
-        self.assertTrue('c' in match)
+        self.assertIn('a', match)
+        self.assertIn('b', match)
+        self.assertIn('c', match)
 
     def test_match_noquote(self):
         match = swift.common.swob.Match('a, b')
         self.assertEqual(match.tags, set(('a', 'b')))
-        self.assertTrue('a' in match)
-        self.assertTrue('b' in match)
+        self.assertIn('a', match)
+        self.assertIn('b', match)
         self.assertNotIn('c', match)
 
 
@@ -358,11 +358,11 @@ class TestAccept(unittest.TestCase):
                        'text /plain', 'text\x7f/plain',
                        'text/plain;a=b=c',
                        'text/plain;q=1;q=2',
+                       'text/plain;q=not-a-number',
                        'text/plain; ubq="unbalanced " quotes"'):
             acc = swift.common.swob.Accept(accept)
-            match = acc.best_match(['text/plain', 'application/xml',
-                                   'text/xml'])
-            self.assertIsNone(match)
+            with self.assertRaises(ValueError):
+                acc.best_match(['text/plain', 'application/xml', 'text/xml'])
 
     def test_repr(self):
         acc = swift.common.swob.Accept("application/json")
@@ -738,7 +738,7 @@ class TestRequest(unittest.TestCase):
         req.range = 'bytes=1-7'
         self.assertEqual(req.range.ranges[0], (1, 7))
 
-        self.assertTrue('Range' in req.headers)
+        self.assertIn('Range', req.headers)
         req.range = None
         self.assertNotIn('Range', req.headers)
 
@@ -755,7 +755,7 @@ class TestRequest(unittest.TestCase):
         self.assertEqual(req.headers['If-Unmodified-Since'], 'something')
         self.assertIsNone(req.if_unmodified_since)
 
-        self.assertTrue('If-Unmodified-Since' in req.headers)
+        self.assertIn('If-Unmodified-Since', req.headers)
         req.if_unmodified_since = None
         self.assertNotIn('If-Unmodified-Since', req.headers)
 
@@ -1026,12 +1026,12 @@ class TestResponse(unittest.TestCase):
 
         resp.location = 'something'
         self.assertEqual(resp.location, 'something')
-        self.assertTrue('Location' in resp.headers)
+        self.assertIn('Location', resp.headers)
         resp.location = None
         self.assertNotIn('Location', resp.headers)
 
         resp.content_type = 'text/plain'
-        self.assertTrue('Content-Type' in resp.headers)
+        self.assertIn('Content-Type', resp.headers)
         resp.content_type = None
         self.assertNotIn('Content-Type', resp.headers)
 
@@ -1078,6 +1078,30 @@ class TestResponse(unittest.TestCase):
         self.assertEqual('shindig', next(iterator))
         app_iter.close()
         self.assertRaises(StopIteration, iterator.next)
+
+    def test_call_finds_nonempty_chunk(self):
+        def test_app(environ, start_response):
+            start_response('400 Bad Request', [])
+            yield ''
+            start_response('200 OK', [])
+            yield 'complete '
+            yield ''
+            yield 'response'
+        req = swift.common.swob.Request.blank('/')
+        req.method = 'GET'
+        status, headers, app_iter = req.call_application(test_app)
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(list(app_iter), ['complete ', '', 'response'])
+
+    def test_call_requires_that_start_response_is_called(self):
+        def test_app(environ, start_response):
+            yield 'response'
+        req = swift.common.swob.Request.blank('/')
+        req.method = 'GET'
+        with self.assertRaises(RuntimeError) as mgr:
+            req.call_application(test_app)
+        self.assertEqual(mgr.exception.args[0],
+                         'application never called start_response')
 
     def test_location_rewrite(self):
         def start_response(env, headers):
@@ -1353,7 +1377,7 @@ class TestResponse(unittest.TestCase):
         self.assertEqual(resp.headers['Etag'], '"hi"')
         self.assertEqual(resp.etag, 'hi')
 
-        self.assertTrue('etag' in resp.headers)
+        self.assertIn('etag', resp.headers)
         resp.etag = None
         self.assertNotIn('etag', resp.headers)
 

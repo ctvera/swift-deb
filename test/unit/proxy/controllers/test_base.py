@@ -627,17 +627,14 @@ class TestFuncs(unittest.TestCase):
                                        StoragePolicy(1, 'one', False)])
         with PatchPolicies(spc):
             resp = headers_to_account_info(headers.items(), 200)
-        self.assertEqual(
-            resp['storage_policies'][0]['object_count'], 13)
-        self.assertEqual(
-            resp['storage_policies'][0]['container_count'], 120)
-        self.assertEqual(
-            resp['storage_policies'][0]['bytes'], 1002)
-        self.assertEqual(
-            resp['storage_policies'][1]['object_count'], 10)
-        self.assertEqual(
-            resp['storage_policies'][1]['container_count'], 20)
-        self.assertEqual(resp['storage_policies'][1]['bytes'], 0)
+        self.assertEqual(resp['storage_policies'], {
+            0: {'object_count': 13,
+                'container_count': 120,
+                'bytes': 1002},
+            1: {'object_count': 10,
+                'container_count': 20,
+                'bytes': 0},
+        })
 
     def test_headers_to_object_info_missing(self):
         resp = headers_to_object_info({}, 404)
@@ -891,6 +888,8 @@ class TestFuncs(unittest.TestCase):
                     return ''
 
             def getheader(self, header):
+                # content-length for the whole object is generated dynamically
+                # by summing non-None chunks initialized as source1
                 if header.lower() == "content-length":
                     return str(sum(len(c) for c in self.chunks
                                    if c is not None))
@@ -900,18 +899,30 @@ class TestFuncs(unittest.TestCase):
 
         node = {'ip': '1.2.3.4', 'port': 6200, 'device': 'sda'}
 
-        source1 = TestSource(['abcd', '1234', 'abc', None])
-        source2 = TestSource(['efgh5678'])
+        source1 = TestSource(['abcd', '1234', None,
+                              'efgh', '5678', 'lots', 'more', 'data'])
+        # incomplete reads of client_chunk_size will be re-fetched
+        source2 = TestSource(['efgh', '5678', 'lots', None])
+        source3 = TestSource(['lots', 'more', 'data'])
         req = Request.blank('/v1/a/c/o')
         handler = GetOrHeadHandler(
             self.app, req, 'Object', None, None, None, {},
             client_chunk_size=8)
 
+        range_headers = []
+        sources = [(source2, node), (source3, node)]
+
+        def mock_get_source_and_node():
+            range_headers.append(handler.backend_headers['Range'])
+            return sources.pop(0)
+
         app_iter = handler._make_app_iter(req, node, source1)
         with mock.patch.object(handler, '_get_source_and_node',
-                               lambda: (source2, node)):
+                               side_effect=mock_get_source_and_node):
             client_chunks = list(app_iter)
-        self.assertEqual(client_chunks, ['abcd1234', 'efgh5678'])
+        self.assertEqual(range_headers, ['bytes=8-27', 'bytes=16-27'])
+        self.assertEqual(client_chunks, [
+            'abcd1234', 'efgh5678', 'lotsmore', 'data'])
 
     def test_client_chunk_size_resuming_chunked(self):
 

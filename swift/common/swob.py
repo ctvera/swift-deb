@@ -691,11 +691,9 @@ class Accept(object):
         Returns None if no available options are acceptable to the client.
 
         :param options: a list of content-types the server can respond with
+        :raises ValueError: if the header is malformed
         """
-        try:
-            types = self._get_types()
-        except ValueError:
-            return None
+        types = self._get_types()
         if not types and options:
             return options[0]
         for pattern in types:
@@ -999,6 +997,8 @@ class Request(object):
             app_iter = output
         if not captured:
             app_iter = reiterate(app_iter)
+        if not captured:
+            raise RuntimeError('application never called start_response')
         return (captured[0], captured[1], app_iter)
 
     def get_response(self, application):

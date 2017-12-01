@@ -77,6 +77,9 @@ To execute the tests:
   --recreate`` or remove the ``.tox`` directory to force ``tox`` to recreate the
   dependency list.
 
+  Swift's tests require having an XFS directory available in ``/tmp`` or
+  in the ``TMPDIR`` environment variable.
+
 Swift's functional tests may be executed against a :doc:`development_saio` or
 other running Swift cluster using the command::
 
@@ -127,9 +130,6 @@ set using environment variables:
   environment variable ``SWIFT_TEST_IN_PROCESS_CONF_LOADER`` to
   ``ec``.
 
-- the deprecated proxy-server ``object_post_as_copy`` option may be set using
-  the environment variable ``SWIFT_TEST_IN_PROCESS_OBJECT_POST_AS_COPY``.
-
 - logging to stdout may be enabled by setting ``SWIFT_TEST_DEBUG_LOGS``.
 
 For example, this command would run the in-process mode functional tests with
@@ -147,7 +147,6 @@ The ``tox.ini`` file also specifies test environments for running other
 in-process functional test configurations, e.g.::
 
   tox -e func-ec
-  tox -e func-post-as-copy
 
 To debug the functional tests, use the 'in-process test' mode and pass the
 ``--pdb`` flag to ``tox``::

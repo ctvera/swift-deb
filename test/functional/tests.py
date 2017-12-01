@@ -87,16 +87,19 @@ class BaseEnv(object):
 
 
 class Base(unittest2.TestCase):
-    # subclasses may override env class
     env = BaseEnv
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.tearDown()
 
     @classmethod
     def setUpClass(cls):
         cls.env.setUp()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.env.tearDown()
+    def setUp(self):
+        if tf.in_process:
+            tf.skip_if_no_xattrs()
 
     def assert_body(self, body):
         response_body = self.env.conn.response.read()
@@ -2531,6 +2534,7 @@ class TestFile(Base):
         self.assertEqual(1024, f_dict['bytes'])
         self.assertEqual('text/foobar', f_dict['content_type'])
         self.assertEqual(etag, f_dict['hash'])
+        put_last_modified = f_dict['last_modified']
 
         # now POST updated content-type to each file
         file_item = self.env.container.file(file_name)
@@ -2555,6 +2559,7 @@ class TestFile(Base):
             self.fail('Failed to find file %r in listing' % file_name)
         self.assertEqual(1024, f_dict['bytes'])
         self.assertEqual('image/foobarbaz', f_dict['content_type'])
+        self.assertLess(put_last_modified, f_dict['last_modified'])
         self.assertEqual(etag, f_dict['hash'])
 
 
@@ -2718,6 +2723,9 @@ class TestServiceToken(unittest2.TestCase):
     def setUp(self):
         if tf.skip_service_tokens:
             raise SkipTest
+
+        if tf.in_process:
+            tf.skip_if_no_xattrs()
 
         self.SET_TO_USERS_TOKEN = 1
         self.SET_TO_SERVICE_TOKEN = 2

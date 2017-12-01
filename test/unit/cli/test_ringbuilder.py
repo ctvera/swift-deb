@@ -134,7 +134,7 @@ class TestCommands(unittest.TestCase, RunSwiftRingBuilderMixin):
                     msg += '%3d: %s\n' % (i, line)
                 self.fail(msg)
 
-    def create_sample_ring(self, part_power=6):
+    def create_sample_ring(self, part_power=6, overload=None):
         """
         Create a sample ring with four devices
 
@@ -151,6 +151,8 @@ class TestCommands(unittest.TestCase, RunSwiftRingBuilderMixin):
             pass
 
         ring = RingBuilder(part_power, 3, 1)
+        if overload is not None:
+            ring.set_overload(overload)
         ring.add_dev({'weight': 100.0,
                       'region': 0,
                       'zone': 0,
@@ -802,6 +804,21 @@ class TestCommands(unittest.TestCase, RunSwiftRingBuilderMixin):
             ring.rebalance()
             self.assertTrue(ring.validate())
 
+    def test_set_weight_old_format_two_devices(self):
+        # Would block without the 'yes' argument
+        self.create_sample_ring()
+        argv = ["", self.tmpfile, "set_weight",
+                "d2", "3.14", "d1", "6.28", "--yes"]
+        self.assertSystemExit(EXIT_SUCCESS, ringbuilder.main, argv)
+
+        ring = RingBuilder.load(self.tmpfile)
+        # Check that weight was changed
+        self.assertEqual(ring.devs[2]['weight'], 3.14)
+        self.assertEqual(ring.devs[1]['weight'], 6.28)
+        # Check that other devices in ring are not affected
+        self.assertEqual(ring.devs[0]['weight'], 100)
+        self.assertEqual(ring.devs[3]['weight'], 100)
+
     def test_set_weight_ipv4_old_format(self):
         self.create_sample_ring()
         # Test ipv4(old format)
@@ -1408,7 +1425,7 @@ class TestCommands(unittest.TestCase, RunSwiftRingBuilderMixin):
         self.assertSystemExit(EXIT_ERROR, ringbuilder.main, argv)
 
     def test_validate_non_existent_file(self):
-        rand_file = '%s/%s' % ('/tmp', str(uuid.uuid4()))
+        rand_file = '%s/%s' % (tempfile.gettempdir(), str(uuid.uuid4()))
         argv = ["", rand_file, "validate"]
         self.assertSystemExit(EXIT_ERROR, ringbuilder.main, argv)
 
@@ -2095,36 +2112,51 @@ class TestCommands(unittest.TestCase, RunSwiftRingBuilderMixin):
         self.assertIsNone(ringbuilder.main(argv))
 
     def test_warn_at_risk(self):
-        # when the number of total part replicas (3 * 2 ** 4 = 48 in
-        # this ring) is less than the total units of weight (310 in this
-        # ring) the relative number of parts per unit of weight (called
-        # weight_of_one_part) is less than 1 - and each whole part
-        # placed takes up a larger ratio of the fractional number of
-        # parts the device wants - so it's much more difficult to
-        # satisfy a device's weight exactly - that is to say less parts
-        # to go around tends to make things lumpy
-        self.create_sample_ring(4)
-        ring = RingBuilder.load(self.tmpfile)
-        ring.devs[0]['weight'] = 10
-        ring.save(self.tmpfile)
+        # check that warning is generated when rebalance does not achieve
+        # satisfactory balance
+        self.create_sample_ring()
+        orig_rebalance = RingBuilder.rebalance
+        fake_balance = 6
+
+        def fake_rebalance(builder_instance, *args, **kwargs):
+            parts, balance, removed_devs = orig_rebalance(builder_instance)
+            return parts, fake_balance, removed_devs
+
         argv = ["", self.tmpfile, "rebalance"]
-        self.assertSystemExit(EXIT_WARNING, ringbuilder.main, argv)
+        with mock.patch("swift.common.ring.builder.RingBuilder.rebalance",
+                        fake_rebalance):
+            self.assertSystemExit(EXIT_WARNING, ringbuilder.main, argv)
+
+        # even when some overload is allowed
+        self.create_sample_ring(overload=0.05)
+        argv = ["", self.tmpfile, "rebalance"]
+        with mock.patch("swift.common.ring.builder.RingBuilder.rebalance",
+                        fake_rebalance):
+            self.assertSystemExit(EXIT_WARNING, ringbuilder.main, argv)
 
     def test_no_warn_when_balanced(self):
-        # when the number of total part replicas (3 * 2 ** 10 = 3072 in
-        # this ring) is larger than the total units of weight (310 in
-        # this ring) the relative number of parts per unit of weight
-        # (called weight_of_one_part) is more than 1 - and each whole
-        # part placed takes up a smaller ratio of the larger number of
-        # parts the device wants - so it's much easier to satisfy a
-        # device's weight exactly - that is to say more parts to go
-        # around tends to smooth things out
-        self.create_sample_ring(10)
-        ring = RingBuilder.load(self.tmpfile)
-        ring.devs[0]['weight'] = 10
-        ring.save(self.tmpfile)
+        # check that no warning is generated when satisfactory balance is
+        # achieved...
+        self.create_sample_ring()
+        orig_rebalance = RingBuilder.rebalance
+        fake_balance = 5
+
+        def fake_rebalance(builder_instance, *args, **kwargs):
+            parts, balance, removed_devs = orig_rebalance(builder_instance)
+            return parts, fake_balance, removed_devs
+
         argv = ["", self.tmpfile, "rebalance"]
-        self.assertSystemExit(EXIT_SUCCESS, ringbuilder.main, argv)
+        with mock.patch("swift.common.ring.builder.RingBuilder.rebalance",
+                        fake_rebalance):
+            self.assertSystemExit(EXIT_SUCCESS, ringbuilder.main, argv)
+
+        # ...or balance is within permitted overload
+        self.create_sample_ring(overload=0.06)
+        fake_balance = 6
+        argv = ["", self.tmpfile, "rebalance"]
+        with mock.patch("swift.common.ring.builder.RingBuilder.rebalance",
+                        fake_rebalance):
+            self.assertSystemExit(EXIT_SUCCESS, ringbuilder.main, argv)
 
     def test_invalid_device_name(self):
         self.create_sample_ring()

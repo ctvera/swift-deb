@@ -45,7 +45,7 @@ from swift.obj.reconstructor import REVERT
 from test.unit import (patch_policies, debug_logger, mocked_http_conn,
                        FabricatedRing, make_timestamp_iter,
                        DEFAULT_TEST_EC_TYPE, encode_frag_archive_bodies,
-                       quiet_eventlet_exceptions)
+                       quiet_eventlet_exceptions, skip_if_no_xattrs)
 from test.unit.obj.common import write_diskfile
 
 
@@ -149,6 +149,7 @@ class TestGlobalSetupObjectReconstructor(unittest.TestCase):
     legacy_durable = False
 
     def setUp(self):
+        skip_if_no_xattrs()
         self.testdir = tempfile.mkdtemp()
         _create_test_rings(self.testdir)
         POLICIES[0].object_ring = ring.Ring(self.testdir, ring_name='object')
@@ -1653,40 +1654,73 @@ class TestWorkerReconstructor(unittest.TestCase):
             'object_reconstruction_last': now,
             'object_reconstruction_time': total,
         }, data)
-        # per_disk_stats with workers
+
+        def check_per_disk_stats(before, now, old_total, total,
+                                 override_devices):
+            with mock.patch('swift.obj.reconstructor.time.time',
+                            return_value=now), \
+                    mock.patch('swift.obj.reconstructor.os.getpid',
+                               return_value='pid-1'):
+                    reconstructor.final_recon_dump(
+                        total, override_devices=override_devices)
+            with open(self.rcache) as f:
+                data = json.load(f)
+            self.assertEqual({
+                'object_reconstruction_last': before,
+                'object_reconstruction_time': old_total,
+                'object_reconstruction_per_disk': {
+                    'sda': {
+                        'object_reconstruction_last': now,
+                        'object_reconstruction_time': total,
+                        'pid': 'pid-1',
+                    },
+                    'sdc': {
+                        'object_reconstruction_last': now,
+                        'object_reconstruction_time': total,
+                        'pid': 'pid-1',
+                    },
+
+                },
+            }, data)
+
+        # per_disk_stats with workers and local_devices
         reconstructor.reconstructor_workers = 1
         old_total = total
         total = 16.0
         before = now
         now += total * 60
-        with mock.patch('swift.obj.reconstructor.time.time',
-                        return_value=now), \
-                mock.patch('swift.obj.reconstructor.os.getpid',
-                           return_value='pid-1'):
-                reconstructor.final_recon_dump(total, override_devices=[
-                    'sda', 'sdc'])
-        with open(self.rcache) as f:
-            data = json.load(f)
-        self.assertEqual({
-            'object_reconstruction_last': before,
-            'object_reconstruction_time': old_total,
-            'object_reconstruction_per_disk': {
-                'sda': {
-                    'object_reconstruction_last': now,
-                    'object_reconstruction_time': total,
-                    'pid': 'pid-1',
-                },
-                'sdc': {
-                    'object_reconstruction_last': now,
-                    'object_reconstruction_time': total,
-                    'pid': 'pid-1',
-                },
+        check_per_disk_stats(before, now, old_total, total, ['sda', 'sdc'])
 
-            },
-        }, data)
+        # per_disk_stats with workers and local_devices but no overrides
+        reconstructor.reconstructor_workers = 1
+        total = 17.0
+        now += total * 60
+        check_per_disk_stats(before, now, old_total, total, [])
+
         # and without workers we clear it out
         reconstructor.reconstructor_workers = 0
         total = 18.0
+        now += total * 60
+        with mock.patch('swift.obj.reconstructor.time.time', return_value=now):
+            reconstructor.final_recon_dump(total)
+        with open(self.rcache) as f:
+            data = json.load(f)
+        self.assertEqual({
+            'object_reconstruction_last': now,
+            'object_reconstruction_time': total,
+        }, data)
+
+        # set per disk stats again...
+        reconstructor.reconstructor_workers = 1
+        old_total = total
+        total = 18.0
+        before = now
+        now += total * 60
+        check_per_disk_stats(before, now, old_total, total, ['sda', 'sdc'])
+
+        # ...then remove all devices and check we clear out per-disk stats
+        reconstructor.all_local_devices = []
+        total = 20.0
         now += total * 60
         with mock.patch('swift.obj.reconstructor.time.time', return_value=now):
             reconstructor.final_recon_dump(total)
@@ -1778,9 +1812,14 @@ class TestWorkerReconstructor(unittest.TestCase):
         # a recon dump, but it'll get cleaned up in the next aggregation
         os.unlink(self.rcache)
         do_test(dict(devices='sdz'), 'sdz')
+        # repeat with no local devices
+        reconstructor.get_local_devices = lambda: set()
+        os.unlink(self.rcache)
+        do_test(dict(devices='sdz'), 'sdz')
 
         # now disable workers and check that inline run_once updates rcache
         # and clears out per disk stats
+        reconstructor.get_local_devices = lambda: {'sda'}
         now = time.time()
         later = now + 600  # 10 mins
         reconstructor.reconstructor_workers = 0
@@ -1972,6 +2011,63 @@ class TestWorkerReconstructor(unittest.TestCase):
                 },
             }
         }, data)
+
+    def test_run_forever_recon_no_devices(self):
+
+        class StopForever(Exception):
+            pass
+
+        reconstructor = object_reconstructor.ObjectReconstructor({
+            'reconstructor_workers': 2,
+            'recon_cache_path': self.recon_cache_path
+        }, logger=self.logger)
+
+        def run_forever_but_stop(pid, mock_times, worker_kwargs):
+            with mock.patch('swift.obj.reconstructor.time.time',
+                            side_effect=mock_times), \
+                    mock.patch('swift.obj.reconstructor.os.getpid',
+                               return_value=pid), \
+                    mock.patch('swift.obj.reconstructor.sleep',
+                               side_effect=[StopForever]), \
+                    Timeout(.3), quiet_eventlet_exceptions(), \
+                    self.assertRaises(StopForever):
+                gt = spawn(reconstructor.run_forever, **worker_kwargs)
+                gt.wait()
+
+        reconstructor.reconstruct = mock.MagicMock()
+        now = time.time()
+        # first run_forever with no devices
+        reconstructor.get_local_devices = lambda: []
+        later = now + 6  # 6 sec
+        worker_args = list(
+            # include 'devices' kwarg as a sanity check - it should be ignored
+            # in run_forever mode
+            reconstructor.get_worker_args(once=False, devices='sda'))
+        run_forever_but_stop('pid-1', [now, later, later], worker_args[0])
+        # override args are passed to reconstruct
+        self.assertEqual([mock.call(
+            override_devices=[],
+            override_partitions=[]
+        )], reconstructor.reconstruct.call_args_list)
+        # forever mode with no args, we expect total recon dumps
+        self.assertTrue(os.path.exists(self.rcache))
+        with open(self.rcache) as f:
+            data = json.load(f)
+        expected = {
+            'object_reconstruction_last': later,
+            'object_reconstruction_time': 0.1,
+        }
+        self.assertEqual(expected, data)
+        reconstructor.reconstruct.reset_mock()
+
+        # aggregation is done in the parent thread even later
+        now = later + 300
+        with mock.patch('swift.obj.reconstructor.time.time',
+                        side_effect=[now]):
+            reconstructor.aggregate_recon_update()
+        with open(self.rcache) as f:
+            data = json.load(f)
+        self.assertEqual(expected, data)
 
     def test_recon_aggregation_waits_for_all_devices(self):
         reconstructor = object_reconstructor.ObjectReconstructor({
@@ -2292,6 +2388,7 @@ class TestWorkerReconstructor(unittest.TestCase):
 @patch_policies(with_ec_default=True)
 class BaseTestObjectReconstructor(unittest.TestCase):
     def setUp(self):
+        skip_if_no_xattrs()
         self.policy = POLICIES.default
         self.policy.object_ring._rtime = time.time() + 3600
         self.testdir = tempfile.mkdtemp()
@@ -2667,46 +2764,51 @@ class TestObjectReconstructor(BaseTestObjectReconstructor):
 
         paths = []
 
-        def fake_check_mount(devices, device):
-            paths.append(os.path.join(devices, device))
-            return False
+        def fake_check_drive(devices, device, mount_check):
+            path = os.path.join(devices, device)
+            if (not mount_check) and os.path.isdir(path):
+                # while mount_check is false, the test still creates the dirs
+                paths.append(path)
+                return path
+            return None
 
         with mock.patch('swift.obj.reconstructor.whataremyips',
                         return_value=[self.ip]), \
                 mock.patch.object(self.policy.object_ring, '_devs',
                                   new=stub_ring_devs), \
-                mock.patch('swift.obj.diskfile.check_mount',
-                           fake_check_mount):
+                mock.patch('swift.obj.diskfile.check_drive',
+                           fake_check_drive):
             part_infos = list(self.reconstructor.collect_parts())
         self.assertEqual(2, len(part_infos))  # sanity, same jobs
         self.assertEqual(set(int(p['partition']) for p in part_infos),
                          set([0, 1]))
 
-        # ... because ismount was not called
-        self.assertEqual(paths, [])
+        # ... because fake_check_drive returned paths for both dirs
+        self.assertEqual(set(paths), set([
+            os.path.join(self.devices, dev) for dev in local_devs]))
 
         # ... now with mount check
         self._configure_reconstructor(mount_check=True)
         self.assertTrue(self.reconstructor.mount_check)
+        paths = []
         for policy in POLICIES:
             self.assertTrue(self.reconstructor._df_router[policy].mount_check)
         with mock.patch('swift.obj.reconstructor.whataremyips',
                         return_value=[self.ip]), \
                 mock.patch.object(self.policy.object_ring, '_devs',
                                   new=stub_ring_devs), \
-                mock.patch('swift.obj.diskfile.check_mount',
-                           fake_check_mount):
+                mock.patch('swift.obj.diskfile.check_drive',
+                           fake_check_drive):
             part_infos = list(self.reconstructor.collect_parts())
         self.assertEqual([], part_infos)  # sanity, no jobs
 
-        # ... because fake_ismount returned False for both paths
-        self.assertEqual(set(paths), set([
-            os.path.join(self.devices, dev) for dev in local_devs]))
+        # ... because fake_check_drive returned False for both paths
+        self.assertFalse(paths)
 
-        def fake_check_mount(devices, device):
-            path = os.path.join(devices, device)
-            if path.endswith('sda'):
-                return True
+        def fake_check_drive(devices, device, mount_check):
+            self.assertTrue(mount_check)
+            if device == 'sda':
+                return os.path.join(devices, device)
             else:
                 return False
 
@@ -2714,8 +2816,8 @@ class TestObjectReconstructor(BaseTestObjectReconstructor):
                         return_value=[self.ip]), \
                 mock.patch.object(self.policy.object_ring, '_devs',
                                   new=stub_ring_devs), \
-                mock.patch('swift.obj.diskfile.check_mount',
-                           fake_check_mount):
+                mock.patch('swift.obj.diskfile.check_drive',
+                           fake_check_drive):
             part_infos = list(self.reconstructor.collect_parts())
         self.assertEqual(1, len(part_infos))  # only sda picked up (part 0)
         self.assertEqual(part_infos[0]['partition'], 0)

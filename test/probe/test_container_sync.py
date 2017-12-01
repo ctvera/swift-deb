@@ -14,7 +14,6 @@
 import json
 import uuid
 import random
-from nose import SkipTest
 import unittest
 
 from six.moves.urllib.parse import urlparse
@@ -33,16 +32,16 @@ def get_current_realm_cluster(url):
     try:
         info = client.get_capabilities(http_conn)
     except client.ClientException:
-        raise SkipTest('Unable to retrieve cluster info')
+        raise unittest.SkipTest('Unable to retrieve cluster info')
     try:
         realms = info['container_sync']['realms']
     except KeyError:
-        raise SkipTest('Unable to find container sync realms')
+        raise unittest.SkipTest('Unable to find container sync realms')
     for realm, realm_info in realms.items():
         for cluster, options in realm_info['clusters'].items():
             if options.get('current', False):
                 return realm, cluster
-    raise SkipTest('Unable find current realm cluster')
+    raise unittest.SkipTest('Unable find current realm cluster')
 
 
 class TestContainerSync(ReplProbeTest):
@@ -93,7 +92,7 @@ class TestContainerSync(ReplProbeTest):
 
         return source['name'], dest['name']
 
-    def _test_sync(self, object_post_as_copy):
+    def test_sync(self):
         source_container, dest_container = self._setup_synced_containers()
 
         # upload to source
@@ -111,12 +110,10 @@ class TestContainerSync(ReplProbeTest):
         self.assertIn('x-object-meta-test', resp_headers)
         self.assertEqual('put_value', resp_headers['x-object-meta-test'])
 
-        # update metadata with a POST, using an internal client so we can
-        # vary the object_post_as_copy setting - first use post-as-copy
+        # update metadata with a POST
         post_headers = {'Content-Type': 'image/jpeg',
                         'X-Object-Meta-Test': 'post_value'}
-        int_client = self.make_internal_client(
-            object_post_as_copy=object_post_as_copy)
+        int_client = self.make_internal_client()
         int_client.set_object_metadata(self.account, source_container,
                                        object_name, post_headers)
         # sanity checks...
@@ -153,12 +150,6 @@ class TestContainerSync(ReplProbeTest):
             client.get_object(
                 self.url, self.token, dest_container, object_name)
         self.assertEqual(404, cm.exception.http_status)  # sanity check
-
-    def test_sync_with_post_as_copy(self):
-        self._test_sync(True)
-
-    def test_sync_with_fast_post(self):
-        self._test_sync(False)
 
     def test_sync_slo_manifest(self):
         # Verify that SLO manifests are sync'd even if their segments can not

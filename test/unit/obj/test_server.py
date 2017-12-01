@@ -39,15 +39,13 @@ from textwrap import dedent
 from eventlet import sleep, spawn, wsgi, Timeout, tpool, greenthread
 from eventlet.green import httplib
 
-from nose import SkipTest
-
 from swift import __version__ as swift_version
 from swift.common.http import is_success
 from test import listen_zero
 from test.unit import FakeLogger, debug_logger, mocked_http_conn, \
-    make_timestamp_iter, DEFAULT_TEST_EC_TYPE
-from test.unit import connect_tcp, readuntil2crlfs, patch_policies, \
-    encode_frag_archive_bodies
+    make_timestamp_iter, DEFAULT_TEST_EC_TYPE, skip_if_no_xattrs, \
+    connect_tcp, readuntil2crlfs, patch_policies, encode_frag_archive_bodies, \
+    mock_check_drive
 from swift.obj import server as object_server
 from swift.obj import updater
 from swift.obj import diskfile
@@ -140,6 +138,7 @@ class TestObjectController(unittest.TestCase):
 
     def setUp(self):
         """Set up for testing swift.object.server.ObjectController"""
+        skip_if_no_xattrs()
         utils.HASH_PATH_SUFFIX = 'endcap'
         utils.HASH_PATH_PREFIX = 'startcap'
         self.tmpdir = mkdtemp()
@@ -346,6 +345,7 @@ class TestObjectController(unittest.TestCase):
 
         req = Request.blank('/sda1/p/a/c/o')
         resp = req.get_response(self.object_controller)
+        self.assertEqual(resp.status_int, 200)
         self.assertEqual(dict(resp.headers), {
             'Content-Type': 'application/x-test',
             'Content-Length': '6',
@@ -2761,6 +2761,68 @@ class TestObjectController(unittest.TestCase):
         self.assertEqual(len(resp.headers['Allow'].split(', ')), 8)
         self.assertEqual(resp.headers['Server'],
                          (server_handler.server_type + '/' + swift_version))
+
+    def test_insufficient_storage_mount_check_true(self):
+        conf = {'devices': self.testdir, 'mount_check': 'true'}
+        object_controller = object_server.ObjectController(conf)
+        for policy in POLICIES:
+            mgr = object_controller._diskfile_router[policy]
+            self.assertTrue(mgr.mount_check)
+        for method in object_controller.allowed_methods:
+            if method in ('OPTIONS', 'SSYNC'):
+                continue
+            path = '/sda1/p/'
+            if method == 'REPLICATE':
+                path += 'suff'
+            else:
+                path += 'a/c/o'
+            req = Request.blank(path, method=method,
+                                headers={'x-timestamp': '1',
+                                         'content-type': 'app/test',
+                                         'content-length': 0})
+            with mock_check_drive() as mocks:
+                try:
+                    resp = req.get_response(object_controller)
+                    self.assertEqual(resp.status_int, 507)
+                    mocks['ismount'].return_value = True
+                    resp = req.get_response(object_controller)
+                    self.assertNotEqual(resp.status_int, 507)
+                    # feel free to rip out this last assertion...
+                    expected = 2 if method in ('PUT', 'REPLICATE') else 4
+                    self.assertEqual(resp.status_int // 100, expected)
+                except AssertionError as e:
+                    self.fail('%s for %s' % (e, method))
+
+    def test_insufficient_storage_mount_check_false(self):
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        object_controller = object_server.ObjectController(conf)
+        for policy in POLICIES:
+            mgr = object_controller._diskfile_router[policy]
+            self.assertFalse(mgr.mount_check)
+        for method in object_controller.allowed_methods:
+            if method in ('OPTIONS', 'SSYNC'):
+                continue
+            path = '/sda1/p/'
+            if method == 'REPLICATE':
+                path += 'suff'
+            else:
+                path += 'a/c/o'
+            req = Request.blank(path, method=method,
+                                headers={'x-timestamp': '1',
+                                         'content-type': 'app/test',
+                                         'content-length': 0})
+            with mock_check_drive() as mocks:
+                try:
+                    resp = req.get_response(object_controller)
+                    self.assertEqual(resp.status_int, 507)
+                    mocks['isdir'].return_value = True
+                    resp = req.get_response(object_controller)
+                    self.assertNotEqual(resp.status_int, 507)
+                    # feel free to rip out this last assertion...
+                    expected = 2 if method in ('PUT', 'REPLICATE') else 4
+                    self.assertEqual(resp.status_int // 100, expected)
+                except AssertionError as e:
+                    self.fail('%s for %s' % (e, method))
 
     def test_GET(self):
         # Test swift.obj.server.ObjectController.GET
@@ -5750,11 +5812,12 @@ class TestObjectController(unittest.TestCase):
                      'Content-Length': '4',
                      'Content-Type': 'application/octet-stream'})
         req.body = 'TEST'
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 201)
 
         # fix server time to now: delete-at is in future, verify GET is ok
         with mock.patch('swift.obj.server.time.time', return_value=now):
+            resp = req.get_response(self.object_controller)
+            self.assertEqual(resp.status_int, 201)
+
             req = Request.blank(
                 '/sda1/p/a/c/o',
                 environ={'REQUEST_METHOD': 'GET'},
@@ -5773,14 +5836,18 @@ class TestObjectController(unittest.TestCase):
             self.assertEqual(resp.headers['X-Backend-Timestamp'],
                              utils.Timestamp(put_timestamp))
             # ...unless X-Backend-Replication is sent
-            req = Request.blank(
-                '/sda1/p/a/c/o',
-                environ={'REQUEST_METHOD': 'GET'},
-                headers={'X-Timestamp': normalize_timestamp(now + 2),
-                         'X-Backend-Replication': 'True'})
-            resp = req.get_response(self.object_controller)
-            self.assertEqual(resp.status_int, 200)
-            self.assertEqual('TEST', resp.body)
+            expected = {
+                'GET': 'TEST',
+                'HEAD': '',
+            }
+            for meth, expected_body in expected.items():
+                req = Request.blank(
+                    '/sda1/p/a/c/o', method=meth,
+                    headers={'X-Timestamp': normalize_timestamp(now + 2),
+                             'X-Backend-Replication': 'True'})
+                resp = req.get_response(self.object_controller)
+                self.assertEqual(resp.status_int, 200)
+                self.assertEqual(expected_body, resp.body)
 
     def test_HEAD_but_expired(self):
         test_time = time() + 10000
@@ -5807,15 +5874,14 @@ class TestObjectController(unittest.TestCase):
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 200)
 
-        orig_time = object_server.time.time
-        try:
-            t = time()
-            delete_at_timestamp = int(t + 1)
+        # fix server time to now: delete-at is in future, verify GET is ok
+        now = time()
+        with mock.patch('swift.obj.server.time.time', return_value=now):
+            delete_at_timestamp = int(now + 1)
             delete_at_container = str(
                 delete_at_timestamp /
                 self.object_controller.expiring_objects_container_divisor *
                 self.object_controller.expiring_objects_container_divisor)
-            object_server.time.time = lambda: t
             put_timestamp = normalize_timestamp(test_time - 1000)
             req = Request.blank(
                 '/sda1/p/a/c/o',
@@ -5834,23 +5900,16 @@ class TestObjectController(unittest.TestCase):
                 headers={'X-Timestamp': normalize_timestamp(test_time)})
             resp = req.get_response(self.object_controller)
             self.assertEqual(resp.status_int, 200)
-        finally:
-            object_server.time.time = orig_time
 
-        orig_time = object_server.time.time
-        try:
-            t = time() + 2
-            object_server.time.time = lambda: t
+        with mock.patch('swift.obj.server.time.time', return_value=now + 2):
             req = Request.blank(
                 '/sda1/p/a/c/o',
                 environ={'REQUEST_METHOD': 'HEAD'},
-                headers={'X-Timestamp': normalize_timestamp(time())})
+                headers={'X-Timestamp': normalize_timestamp(now + 2)})
             resp = req.get_response(self.object_controller)
             self.assertEqual(resp.status_int, 404)
             self.assertEqual(resp.headers['X-Backend-Timestamp'],
                              utils.Timestamp(put_timestamp))
-        finally:
-            object_server.time.time = orig_time
 
     def test_POST_but_expired(self):
         test_time = time() + 10000
@@ -6228,22 +6287,6 @@ class TestObjectController(unittest.TestCase):
             tpool.execute = was_tpool_exe
             diskfile.DiskFileManager._get_hashes = was_get_hashes
 
-    def test_REPLICATE_insufficient_storage(self):
-        conf = {'devices': self.testdir, 'mount_check': 'true'}
-        self.object_controller = object_server.ObjectController(
-            conf, logger=debug_logger())
-        self.object_controller.bytes_per_sync = 1
-
-        def fake_check_mount(*args, **kwargs):
-            return False
-
-        with mock.patch("swift.obj.diskfile.check_mount", fake_check_mount):
-            req = Request.blank('/sda1/p/suff',
-                                environ={'REQUEST_METHOD': 'REPLICATE'},
-                                headers={})
-            resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 507)
-
     def test_REPLICATE_reclaims_tombstones(self):
         conf = {'devices': self.testdir, 'mount_check': False,
                 'reclaim_age': 100}
@@ -6363,7 +6406,7 @@ class TestObjectController(unittest.TestCase):
         except NotImplementedError:
             # On some operating systems (at a minimum, OS X) it's not possible
             # to introspect the value of a semaphore
-            raise SkipTest
+            raise unittest.SkipTest
         else:
             self.assertEqual(value, 4)
 
@@ -6898,6 +6941,7 @@ class TestObjectController(unittest.TestCase):
 class TestObjectServer(unittest.TestCase):
 
     def setUp(self):
+        skip_if_no_xattrs()
         # dirs
         self.tmpdir = mkdtemp()
         self.tempdir = os.path.join(self.tmpdir, 'tmp_test_obj_server')
@@ -7588,8 +7632,9 @@ class TestZeroCopy(unittest.TestCase):
         return True
 
     def setUp(self):
+        skip_if_no_xattrs()
         if not self._system_can_zero_copy():
-            raise SkipTest("zero-copy support is missing")
+            raise unittest.SkipTest("zero-copy support is missing")
 
         self.testdir = mkdtemp(suffix="obj_server_zero_copy")
         mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))

@@ -57,12 +57,12 @@ from pyeclib.ec_iface import ECDriverError, ECInvalidFragmentMetadata, \
     ECBadFragmentChecksum, ECInvalidParameter
 
 from swift import gettext_ as _
-from swift.common.constraints import check_mount, check_dir
+from swift.common.constraints import check_drive
 from swift.common.request_helpers import is_sys_meta
 from swift.common.utils import mkdirs, Timestamp, \
     storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
     fsync_dir, drop_buffer_cache, lock_path, write_pickle, \
-    config_true_value, listdir, split_path, ismount, remove_file, \
+    config_true_value, listdir, split_path, remove_file, \
     get_md5_socket, F_SETPIPE_SZ, decode_timestamps, encode_timestamps, \
     tpool_reraise, MD5_OF_EMPTY_STRING, link_fd_to_path, o_tmpfile_supported, \
     O_TMPFILE, makedirs_count, replace_partition_in_path
@@ -70,7 +70,8 @@ from swift.common.splice import splice, tee
 from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
     DiskFileDeleted, DiskFileError, DiskFileNotOpen, PathNotDir, \
-    ReplicationLockTimeout, DiskFileExpired, DiskFileXattrNotSupported
+    ReplicationLockTimeout, DiskFileExpired, DiskFileXattrNotSupported, \
+    DiskFileBadMetadataChecksum
 from swift.common.swob import multi_range_iterator
 from swift.common.storage_policy import (
     get_policy_string, split_policy_string, PolicyError, POLICIES,
@@ -83,10 +84,12 @@ DEFAULT_RECLAIM_AGE = timedelta(weeks=1).total_seconds()
 HASH_FILE = 'hashes.pkl'
 HASH_INVALIDATIONS_FILE = 'hashes.invalid'
 METADATA_KEY = 'user.swift.metadata'
+METADATA_CHECKSUM_KEY = 'user.swift.metadata_checksum'
 DROP_CACHE_WINDOW = 1024 * 1024
 # These are system-set metadata keys that cannot be changed with a POST.
 # They should be lowercase.
-DATAFILE_SYSTEM_META = set('content-length deleted etag'.split())
+RESERVED_DATAFILE_META = {'content-length', 'deleted', 'etag'}
+DATAFILE_SYSTEM_META = {'x-static-large-object'}
 DATADIR_BASE = 'objects'
 ASYNCDIR_BASE = 'async_pending'
 TMP_BASE = 'tmp'
@@ -144,16 +147,33 @@ def read_metadata(fd):
                                                      (key or '')))
             key += 1
     except (IOError, OSError) as e:
-        for err in 'ENOTSUP', 'EOPNOTSUPP':
-            if hasattr(errno, err) and e.errno == getattr(errno, err):
-                msg = "Filesystem at %s does not support xattr" % \
-                      _get_filename(fd)
-                logging.exception(msg)
-                raise DiskFileXattrNotSupported(e)
+        if errno.errorcode.get(e.errno) in ('ENOTSUP', 'EOPNOTSUPP'):
+            msg = "Filesystem at %s does not support xattr"
+            logging.exception(msg, _get_filename(fd))
+            raise DiskFileXattrNotSupported(e)
         if e.errno == errno.ENOENT:
             raise DiskFileNotExist()
         # TODO: we might want to re-raise errors that don't denote a missing
         # xattr here.  Seems to be ENODATA on linux and ENOATTR on BSD/OSX.
+
+    metadata_checksum = None
+    try:
+        metadata_checksum = xattr.getxattr(fd, METADATA_CHECKSUM_KEY)
+    except (IOError, OSError) as e:
+        # All the interesting errors were handled above; the only thing left
+        # here is ENODATA / ENOATTR to indicate that this attribute doesn't
+        # exist. This is fine; it just means that this object predates the
+        # introduction of metadata checksums.
+        pass
+
+    if metadata_checksum:
+        computed_checksum = hashlib.md5(metadata).hexdigest()
+        if metadata_checksum != computed_checksum:
+            raise DiskFileBadMetadataChecksum(
+                "Metadata checksum mismatch for %s: "
+                "stored checksum='%s', computed='%s'" % (
+                    fd, metadata_checksum, computed_checksum))
+
     # strings are utf-8 encoded when written, but have not always been
     # (see https://bugs.launchpad.net/swift/+bug/1678018) so encode them again
     # when read
@@ -168,25 +188,27 @@ def write_metadata(fd, metadata, xattr_size=65536):
     :param metadata: metadata to write
     """
     metastr = pickle.dumps(_encode_metadata(metadata), PICKLE_PROTOCOL)
+    metastr_md5 = hashlib.md5(metastr).hexdigest()
     key = 0
-    while metastr:
-        try:
+    try:
+        while metastr:
             xattr.setxattr(fd, '%s%s' % (METADATA_KEY, key or ''),
                            metastr[:xattr_size])
             metastr = metastr[xattr_size:]
             key += 1
-        except IOError as e:
-            for err in 'ENOTSUP', 'EOPNOTSUPP':
-                if hasattr(errno, err) and e.errno == getattr(errno, err):
-                    msg = "Filesystem at %s does not support xattr" % \
-                          _get_filename(fd)
-                    logging.exception(msg)
-                    raise DiskFileXattrNotSupported(e)
-            if e.errno in (errno.ENOSPC, errno.EDQUOT):
-                msg = "No space left on device for %s" % _get_filename(fd)
-                logging.exception(msg)
-                raise DiskFileNoSpace()
-            raise
+        xattr.setxattr(fd, METADATA_CHECKSUM_KEY, metastr_md5)
+    except IOError as e:
+        # errno module doesn't always have both of these, hence the ugly
+        # check
+        if errno.errorcode.get(e.errno) in ('ENOTSUP', 'EOPNOTSUPP'):
+            msg = "Filesystem at %s does not support xattr"
+            logging.exception(msg, _get_filename(fd))
+            raise DiskFileXattrNotSupported(e)
+        elif e.errno in (errno.ENOSPC, errno.EDQUOT):
+            msg = "No space left on device for %s" % _get_filename(fd)
+            logging.exception(msg)
+            raise DiskFileNoSpace()
+        raise
 
 
 def extract_policy(obj_path):
@@ -428,11 +450,11 @@ def object_audit_location_generator(devices, mount_check=True, logger=None,
     shuffle(device_dirs)
 
     for device in device_dirs:
-        if mount_check and not \
-                ismount(os.path.join(devices, device)):
+        if not check_drive(devices, device, mount_check):
             if logger:
                 logger.debug(
-                    _('Skipping %s as it is not mounted'), device)
+                    'Skipping %s as it is not %s', device,
+                    'mounted' if mount_check else 'a dir')
             continue
         # loop through object dirs for all policies
         device_dir = os.path.join(devices, device)
@@ -623,8 +645,28 @@ class BaseDiskFileManager(object):
         self.bytes_per_sync = int(conf.get('mb_per_sync', 512)) * 1024 * 1024
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
         self.reclaim_age = int(conf.get('reclaim_age', DEFAULT_RECLAIM_AGE))
-        self.replication_one_per_device = config_true_value(
-            conf.get('replication_one_per_device', 'true'))
+        replication_concurrency_per_device = conf.get(
+            'replication_concurrency_per_device')
+        replication_one_per_device = conf.get('replication_one_per_device')
+        if replication_concurrency_per_device is None \
+                and replication_one_per_device is not None:
+            self.logger.warning('Option replication_one_per_device is '
+                                'deprecated and will be removed in a future '
+                                'version. Update your configuration to use '
+                                'option replication_concurrency_per_device.')
+            if config_true_value(replication_one_per_device):
+                replication_concurrency_per_device = 1
+            else:
+                replication_concurrency_per_device = 0
+        elif replication_one_per_device is not None:
+            self.logger.warning('Option replication_one_per_device ignored as '
+                                'replication_concurrency_per_device is '
+                                'defined.')
+        if replication_concurrency_per_device is None:
+            self.replication_concurrency_per_device = 1
+        else:
+            self.replication_concurrency_per_device = int(
+                replication_concurrency_per_device)
         self.replication_lock_timeout = int(conf.get(
             'replication_lock_timeout', 15))
 
@@ -1188,15 +1230,15 @@ class BaseDiskFileManager(object):
         :returns: full path to the device, None if the path to the device is
                   not a proper mount point or directory.
         """
-        # we'll do some kind of check unless explicitly forbidden
-        if mount_check is not False:
-            if mount_check or self.mount_check:
-                check = check_mount
-            else:
-                check = check_dir
-            if not check(self.devices, device):
-                return None
-        return os.path.join(self.devices, device)
+        if mount_check is False:
+            # explicitly forbidden from syscall, just return path
+            return join(self.devices, device)
+        # we'll do some kind of check if not explicitly forbidden
+        if mount_check or self.mount_check:
+            mount_check = True
+        else:
+            mount_check = False
+        return check_drive(self.devices, device, mount_check)
 
     @contextmanager
     def replication_lock(self, device):
@@ -1208,12 +1250,13 @@ class BaseDiskFileManager(object):
         :raises ReplicationLockTimeout: If the lock on the device
             cannot be granted within the configured timeout.
         """
-        if self.replication_one_per_device:
+        if self.replication_concurrency_per_device:
             dev_path = self.get_dev_path(device)
             with lock_path(
                     dev_path,
                     timeout=self.replication_lock_timeout,
-                    timeout_class=ReplicationLockTimeout):
+                    timeout_class=ReplicationLockTimeout,
+                    limit=self.replication_concurrency_per_device):
                 yield True
         else:
             yield True
@@ -2367,6 +2410,8 @@ class BaseDiskFile(object):
             return read_metadata(source)
         except (DiskFileXattrNotSupported, DiskFileNotExist):
             raise
+        except DiskFileBadMetadataChecksum as err:
+            raise self._quarantine(quarantine_filename, str(err))
         except Exception as err:
             raise self._quarantine(
                 quarantine_filename,
@@ -2416,7 +2461,8 @@ class BaseDiskFile(object):
                 self._merge_content_type_metadata(ctype_file)
             sys_metadata = dict(
                 [(key, val) for key, val in self._datafile_metadata.items()
-                 if key.lower() in DATAFILE_SYSTEM_META
+                 if key.lower() in (RESERVED_DATAFILE_META |
+                                    DATAFILE_SYSTEM_META)
                  or is_sys_meta('object', key)])
             self._metadata.update(self._metafile_metadata)
             self._metadata.update(sys_metadata)

@@ -31,10 +31,9 @@ from swift.common.header_key_dict import HeaderKeyDict
 
 from swift import gettext_ as _
 from swift.common.storage_policy import POLICIES
-from swift.common.constraints import FORMAT2CONTENT_TYPE
 from swift.common.exceptions import ListingIterError, SegmentError
 from swift.common.http import is_success
-from swift.common.swob import HTTPBadRequest, HTTPNotAcceptable, \
+from swift.common.swob import HTTPBadRequest, \
     HTTPServiceUnavailable, Range, is_chunked, multi_range_iterator
 from swift.common.utils import split_path, validate_device_partition, \
     close_if_possible, maybe_multipart_byteranges_to_document_iters, \
@@ -68,28 +67,6 @@ def get_param(req, name, default=None):
                 request=req, content_type='text/plain',
                 body='"%s" parameter not valid UTF-8' % name)
     return value
-
-
-def get_listing_content_type(req):
-    """
-    Determine the content type to use for an account or container listing
-    response.
-
-    :param req: request object
-    :returns: content type as a string (e.g. text/plain, application/json)
-    :raises HTTPNotAcceptable: if the requested content type is not acceptable
-    :raises HTTPBadRequest: if the 'format' query param is provided and
-             not valid UTF-8
-    """
-    query_format = get_param(req, 'format')
-    if query_format:
-        req.accept = FORMAT2CONTENT_TYPE.get(
-            query_format.lower(), FORMAT2CONTENT_TYPE['plain'])
-    out_content_type = req.accept.best_match(
-        ['text/plain', 'application/json', 'application/xml', 'text/xml'])
-    if not out_content_type:
-        raise HTTPNotAcceptable(request=req)
-    return out_content_type
 
 
 def get_name_and_placement(request, minsegs=1, maxsegs=None,
@@ -200,6 +177,8 @@ def strip_user_meta_prefix(server_type, key):
     :param key: header key
     :returns: stripped header key
     """
+    if not is_user_meta(server_type, key):
+        raise ValueError('Key is not user meta')
     return key[len(get_user_meta_prefix(server_type)):]
 
 
@@ -212,6 +191,8 @@ def strip_sys_meta_prefix(server_type, key):
     :param key: header key
     :returns: stripped header key
     """
+    if not is_sys_meta(server_type, key):
+        raise ValueError('Key is not sysmeta')
     return key[len(get_sys_meta_prefix(server_type)):]
 
 
@@ -223,6 +204,8 @@ def strip_object_transient_sysmeta_prefix(key):
     :param key: header key
     :returns: stripped header key
     """
+    if not is_object_transient_sysmeta(key):
+        raise ValueError('Key is not object transient sysmeta')
     return key[len(OBJECT_TRANSIENT_SYSMETA_PREFIX):]
 
 
@@ -356,7 +339,7 @@ class SegmentedIterable(object):
                     seg_size is not None and last_byte == seg_size - 1)
                 if time.time() - start_time > self.max_get_time:
                     raise SegmentError(
-                        'ERROR: While processing manifest %s, '
+                        'While processing manifest %s, '
                         'max LO GET time of %ds exceeded' %
                         (self.name, self.max_get_time))
                 # The "multipart-manifest=get" query param ensures that the
@@ -413,7 +396,7 @@ class SegmentedIterable(object):
             e_type, e_value, e_traceback = sys.exc_info()
             if time.time() - start_time > self.max_get_time:
                 raise SegmentError(
-                    'ERROR: While processing manifest %s, '
+                    'While processing manifest %s, '
                     'max LO GET time of %ds exceeded' %
                     (self.name, self.max_get_time))
             if pending_req:
@@ -422,7 +405,7 @@ class SegmentedIterable(object):
 
         if time.time() - start_time > self.max_get_time:
             raise SegmentError(
-                'ERROR: While processing manifest %s, '
+                'While processing manifest %s, '
                 'max LO GET time of %ds exceeded' %
                 (self.name, self.max_get_time))
         if pending_req:
@@ -437,7 +420,7 @@ class SegmentedIterable(object):
                 if not is_success(seg_resp.status_int):
                     close_if_possible(seg_resp.app_iter)
                     raise SegmentError(
-                        'ERROR: While processing manifest %s, '
+                        'While processing manifest %s, '
                         'got %d while retrieving %s' %
                         (self.name, seg_resp.status_int, seg_req.path))
 
@@ -502,10 +485,10 @@ class SegmentedIterable(object):
             if bytes_left:
                 raise SegmentError(
                     'Not enough bytes for %s; closing connection' % self.name)
-        except (ListingIterError, SegmentError):
-            self.logger.exception(_('ERROR: An error occurred '
-                                    'while retrieving segments'))
-            raise
+        except (ListingIterError, SegmentError) as err:
+            self.logger.error(err)
+            if not self.validated_first_segment:
+                raise
         finally:
             if self.current_resp:
                 close_if_possible(self.current_resp.app_iter)
@@ -550,12 +533,13 @@ class SegmentedIterable(object):
         """
         if self.validated_first_segment:
             return
-        self.validated_first_segment = True
 
         try:
             self.peeked_chunk = next(self.app_iter)
         except StopIteration:
             pass
+        finally:
+            self.validated_first_segment = True
 
     def __iter__(self):
         if self.peeked_chunk is not None:

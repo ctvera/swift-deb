@@ -53,13 +53,14 @@ from test import listen_zero
 from test.unit import (
     connect_tcp, readuntil2crlfs, FakeLogger, fake_http_connect, FakeRing,
     FakeMemcache, debug_logger, patch_policies, write_fake_ring,
-    mocked_http_conn, DEFAULT_TEST_EC_TYPE, make_timestamp_iter)
+    mocked_http_conn, DEFAULT_TEST_EC_TYPE, make_timestamp_iter,
+    skip_if_no_xattrs)
 from test.unit.helpers import setup_servers, teardown_servers
 from swift.proxy import server as proxy_server
 from swift.proxy.controllers.obj import ReplicatedObjectController
 from swift.obj import server as object_server
 from swift.common.middleware import proxy_logging, versioned_writes, \
-    copy
+    copy, listing_formats
 from swift.common.middleware.acl import parse_acl, format_acl
 from swift.common.exceptions import ChunkReadTimeout, DiskFileNotExist, \
     APIVersionError, ChunkWriteTimeout
@@ -237,6 +238,7 @@ def _limit_max_file_size(f):
 class TestController(unittest.TestCase):
 
     def setUp(self):
+        skip_if_no_xattrs()
         self.account_ring = FakeRing()
         self.container_ring = FakeRing()
         self.memcache = FakeMemcache()
@@ -1288,6 +1290,7 @@ class TestProxyServerLoading(unittest.TestCase):
 class TestProxyServerConfigLoading(unittest.TestCase):
 
     def setUp(self):
+        skip_if_no_xattrs()
         self.tempdir = mkdtemp()
         account_ring_path = os.path.join(self.tempdir, 'account.ring.gz')
         write_fake_ring(account_ring_path)
@@ -1987,6 +1990,7 @@ class TestReplicatedObjectController(
     Test suite for replication policy
     """
     def setUp(self):
+        skip_if_no_xattrs()
         self.app = proxy_server.Application(
             None, FakeMemcache(),
             logger=debug_logger('proxy-ut'),
@@ -3192,8 +3196,6 @@ class TestReplicatedObjectController(
 
     def test_POST(self):
         with save_globals():
-            self.app.object_post_as_copy = False
-
             def test_status_map(statuses, expected):
                 set_http_connect(*statuses)
                 self.app.memcache.store = {}
@@ -3218,7 +3220,6 @@ class TestReplicatedObjectController(
     def test_POST_backend_headers(self):
         # reset the router post patch_policies
         self.app.obj_controller_router = proxy_server.ObjectControllerRouter()
-        self.app.object_post_as_copy = False
         self.app.sort_nodes = lambda nodes, *args, **kwargs: nodes
         backend_requests = []
 
@@ -3436,7 +3437,6 @@ class TestReplicatedObjectController(
     def test_POST_meta_val_len(self):
         with save_globals():
             limit = constraints.MAX_META_VALUE_LENGTH
-            self.app.object_post_as_copy = False
             ReplicatedObjectController(
                 self.app, 'account', 'container', 'object')
             set_http_connect(200, 200, 202, 202, 202)
@@ -3462,7 +3462,6 @@ class TestReplicatedObjectController(
             return
         with save_globals():
             limit = constraints.MAX_META_VALUE_LENGTH
-            self.app.object_post_as_copy = False
             controller = ReplicatedObjectController(
                 self.app, 'account', 'container', 'object')
             set_http_connect(200, 200, 202, 202, 202)
@@ -3478,7 +3477,6 @@ class TestReplicatedObjectController(
     def test_POST_meta_key_len(self):
         with save_globals():
             limit = constraints.MAX_META_NAME_LENGTH
-            self.app.object_post_as_copy = False
             set_http_connect(200, 200, 202, 202, 202)
             #                acct cont obj  obj  obj
             req = Request.blank(
@@ -4224,7 +4222,6 @@ class TestReplicatedObjectController(
 
     def test_PUT_POST_requires_container_exist(self):
         with save_globals():
-            self.app.object_post_as_copy = False
             self.app.memcache = FakeMemcacheReturnsNone()
             controller = ReplicatedObjectController(
                 self.app, 'account', 'container', 'object')
@@ -4837,7 +4834,6 @@ class TestReplicatedObjectController(
             called[0] = True
             return HTTPUnauthorized(request=req)
         with save_globals():
-            self.app.object_post_as_copy = False
             set_http_connect(200, 200, 201, 201, 201)
             controller = ReplicatedObjectController(
                 self.app, 'account', 'container', 'object')
@@ -4868,7 +4864,6 @@ class TestReplicatedObjectController(
 
     def test_POST_converts_delete_after_to_delete_at(self):
         with save_globals():
-            self.app.object_post_as_copy = False
             controller = ReplicatedObjectController(
                 self.app, 'account', 'container', 'object')
             set_http_connect(200, 200, 202, 202, 202)
@@ -5365,7 +5360,6 @@ class TestReplicatedObjectController(
 
     def test_POST_x_container_headers_with_more_container_replicas(self):
         self.app.container_ring.set_replicas(4)
-        self.app.object_post_as_copy = False
 
         req = Request.blank('/v1/a/c/o',
                             environ={'REQUEST_METHOD': 'POST'},
@@ -6258,21 +6252,7 @@ class BaseTestECObjectController(BaseTestObjectController):
                                  self.ec_policy.object_ring.replica_count)
 
                 if method == 'POST':
-                    # Take care fast post here!
-                    orig_post_as_copy = getattr(
-                        _test_servers[0], 'object_post_as_copy', None)
-                    try:
-                        _test_servers[0].object_post_as_copy = False
-                        with mock.patch.object(
-                                _test_servers[0],
-                                'object_post_as_copy', False):
-                            headers = get_ring_reloaded_response(method)
-                    finally:
-                        if orig_post_as_copy is None:
-                            del _test_servers[0].object_post_as_copy
-                        else:
-                            _test_servers[0].object_post_as_copy = \
-                                orig_post_as_copy
+                    headers = get_ring_reloaded_response(method)
 
                     exp = 'HTTP/1.1 20'
                     self.assertEqual(headers[:len(exp)], exp)
@@ -6407,6 +6387,7 @@ class BaseTestECObjectController(BaseTestObjectController):
 
 class TestECObjectController(BaseTestECObjectController, unittest.TestCase):
     def setUp(self):
+        skip_if_no_xattrs()
         self.ec_policy = POLICIES[3]
         super(TestECObjectController, self).setUp()
 
@@ -6414,11 +6395,15 @@ class TestECObjectController(BaseTestECObjectController, unittest.TestCase):
 class TestECDuplicationObjectController(
         BaseTestECObjectController, unittest.TestCase):
     def setUp(self):
+        skip_if_no_xattrs()
         self.ec_policy = POLICIES[4]
         super(TestECDuplicationObjectController, self).setUp()
 
 
 class TestECMismatchedFA(unittest.TestCase):
+    def setUp(self):
+        skip_if_no_xattrs()
+
     def tearDown(self):
         prosrv = _test_servers[0]
         # don't leak error limits and poison other tests
@@ -6603,10 +6588,17 @@ class TestECMismatchedFA(unittest.TestCase):
 
 
 class TestECGets(unittest.TestCase):
+    def setUp(self):
+        super(TestECGets, self).setUp()
+        skip_if_no_xattrs()
+        self.tempdir = mkdtemp()
+
     def tearDown(self):
+        rmtree(self.tempdir, ignore_errors=True)
         prosrv = _test_servers[0]
         # don't leak error limits and poison other tests
         prosrv._error_limiting = {}
+        super(TestECGets, self).tearDown()
 
     def _setup_nodes_and_do_GET(self, objs, node_state):
         """
@@ -6666,7 +6658,7 @@ class TestECGets(unittest.TestCase):
 
             # move all hash dir files to per-node, per-obj tempdir
             for node_index, hash_dir in node_hash_dirs.items():
-                node_tmp_dirs[node_index][ref] = mkdtemp()
+                node_tmp_dirs[node_index][ref] = mkdtemp(dir=self.tempdir)
                 for f in os.listdir(hash_dir):
                     move(os.path.join(hash_dir, f),
                          os.path.join(node_tmp_dirs[node_index][ref], f))
@@ -6870,6 +6862,7 @@ class TestObjectDisconnectCleanup(unittest.TestCase):
                 mkdirs(data_path)
 
     def setUp(self):
+        skip_if_no_xattrs()
         debug.hub_exceptions(False)
         self._cleanup_devices()
 
@@ -6978,6 +6971,7 @@ class TestObjectECRangedGET(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        skip_if_no_xattrs()
         cls.obj_name = 'range-get-test'
         cls.tiny_obj_name = 'range-get-test-tiny'
         cls.aligned_obj_name = 'range-get-test-aligned'
@@ -7654,10 +7648,9 @@ class TestContainerController(unittest.TestCase):
             # return 404 (as account is not found) and don't cache container
             test_status_map((404, 404, 404), 404, None, 404)
 
-            # cache a 204 for the account because it's sort of like it
-            # exists
+            # cache a 200 for the account because it appears to be created
             self.app.account_autocreate = True
-            test_status_map((404, 404, 404), 404, None, 204)
+            test_status_map((404, 404, 404), 404, None, 200)
 
     def test_PUT_policy_headers(self):
         backend_requests = []
@@ -8827,14 +8820,38 @@ class TestAccountController(unittest.TestCase):
             # ALL nodes are asked to create the account
             # If successful, the GET request is repeated.
             controller.app.account_autocreate = True
-            self.assert_status_map(controller.GET,
-                                   (404, 404, 404), 204)
-            self.assert_status_map(controller.GET,
-                                   (404, 503, 404), 204)
-
+            expected = 200
+            self.assert_status_map(controller.GET, (404, 404, 404), expected)
+            self.assert_status_map(controller.GET, (404, 503, 404), expected)
             # We always return 503 if no majority between 4xx, 3xx or 2xx found
             self.assert_status_map(controller.GET,
                                    (500, 500, 400), 503)
+
+    def _check_autocreate_listing_with_query_string(self, query_string):
+        controller = proxy_server.AccountController(self.app, 'a')
+        controller.app.account_autocreate = True
+        statuses = (404, 404, 404)
+        expected = 200
+        # get the response to check it has json content
+        with save_globals():
+            set_http_connect(*statuses)
+            req = Request.blank('/v1/a' + query_string)
+            self.app.update_request(req)
+            res = controller.GET(req)
+            headers = res.headers
+            self.assertEqual(
+                'yes', headers.get('X-Backend-Fake-Account-Listing'))
+            self.assertEqual(
+                'application/json; charset=utf-8',
+                headers.get('Content-Type'))
+            self.assertEqual([], json.loads(res.body))
+            self.assertEqual(res.status_int, expected)
+
+    def test_auto_create_account_listing_response_is_json(self):
+        self._check_autocreate_listing_with_query_string('')
+        self._check_autocreate_listing_with_query_string('?format=plain')
+        self._check_autocreate_listing_with_query_string('?format=json')
+        self._check_autocreate_listing_with_query_string('?format=xml')
 
     def test_HEAD(self):
         # Same behaviour as GET
@@ -8864,9 +8881,9 @@ class TestAccountController(unittest.TestCase):
                                    (404, 404, 404), 404)
             controller.app.account_autocreate = True
             self.assert_status_map(controller.HEAD,
-                                   (404, 404, 404), 204)
+                                   (404, 404, 404), 200)
             self.assert_status_map(controller.HEAD,
-                                   (500, 404, 404), 204)
+                                   (500, 404, 404), 200)
             # We always return 503 if no majority between 4xx, 3xx or 2xx found
             self.assert_status_map(controller.HEAD,
                                    (500, 500, 400), 503)
@@ -9194,10 +9211,11 @@ class TestAccountControllerFakeGetResponse(unittest.TestCase):
     """
     def setUp(self):
         conf = {'account_autocreate': 'yes'}
-        self.app = proxy_server.Application(conf, FakeMemcache(),
-                                            account_ring=FakeRing(),
-                                            container_ring=FakeRing())
-        self.app.memcache = FakeMemcacheReturnsNone()
+        self.app = listing_formats.ListingFilter(
+            proxy_server.Application(conf, FakeMemcache(),
+                                     account_ring=FakeRing(),
+                                     container_ring=FakeRing()))
+        self.app.app.memcache = FakeMemcacheReturnsNone()
 
     def test_GET_autocreate_accept_json(self):
         with save_globals():
@@ -9264,6 +9282,24 @@ class TestAccountControllerFakeGetResponse(unittest.TestCase):
                                          'PATH_INFO': '/v1/a'})
             resp = req.get_response(self.app)
             self.assertEqual(406, resp.status_int)
+
+    def test_GET_autocreate_bad_accept(self):
+        with save_globals():
+            set_http_connect(*([404] * 100))  # nonexistent: all backends 404
+            req = Request.blank('/v1/a', headers={"Accept": "a/b;q=nope"},
+                                environ={'REQUEST_METHOD': 'GET',
+                                         'PATH_INFO': '/v1/a'})
+            resp = req.get_response(self.app)
+            self.assertEqual(400, resp.status_int)
+            self.assertEqual('Invalid Accept header', resp.body)
+
+            set_http_connect(*([404] * 100))  # nonexistent: all backends 404
+            req = Request.blank('/v1/a', headers={"Accept": "a/b;q=0.5;q=1"},
+                                environ={'REQUEST_METHOD': 'GET',
+                                         'PATH_INFO': '/v1/a'})
+            resp = req.get_response(self.app)
+            self.assertEqual(400, resp.status_int)
+            self.assertEqual('Invalid Accept header', resp.body)
 
     def test_GET_autocreate_format_invalid_utf8(self):
         with save_globals():
@@ -9464,6 +9500,7 @@ class TestProxyObjectPerformance(unittest.TestCase):
         # This is just a simple test that can be used to verify and debug the
         # various data paths between the proxy server and the object
         # server. Used as a play ground to debug buffer sizes for sockets.
+        skip_if_no_xattrs()
         prolis = _test_sockets[0]
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         # Client is transmitting in 2 MB chunks
@@ -9577,6 +9614,7 @@ class TestSocketObjectVersions(unittest.TestCase):
 
     def setUp(self):
         global _test_sockets
+        skip_if_no_xattrs()
         self.prolis = prolis = listen_zero()
         self._orig_prolis = _test_sockets[0]
         allowed_headers = ', '.join([
@@ -9587,12 +9625,15 @@ class TestSocketObjectVersions(unittest.TestCase):
         ])
         conf = {'devices': _testdir, 'swift_dir': _testdir,
                 'mount_check': 'false', 'allowed_headers': allowed_headers}
-        prosrv = versioned_writes.VersionedWritesMiddleware(
+        prosrv = listing_formats.ListingFilter(
             copy.ServerSideCopyMiddleware(
-                proxy_logging.ProxyLoggingMiddleware(
-                    _test_servers[0], conf,
-                    logger=_test_servers[0].logger), conf),
-            {})
+                versioned_writes.VersionedWritesMiddleware(
+                    proxy_logging.ProxyLoggingMiddleware(
+                        _test_servers[0], conf,
+                        logger=_test_servers[0].logger), {}),
+                {}
+            )
+        )
         self.coro = spawn(wsgi.server, prolis, prosrv, NullLogger())
         # replace global prosrv with one that's filtered with version
         # middleware

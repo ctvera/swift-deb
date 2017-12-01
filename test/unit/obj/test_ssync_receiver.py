@@ -34,7 +34,8 @@ from swift.obj import ssync_receiver, ssync_sender
 from swift.obj.reconstructor import ObjectReconstructor
 
 from test import listen_zero, unit
-from test.unit import debug_logger, patch_policies, make_timestamp_iter
+from test.unit import (debug_logger, patch_policies, make_timestamp_iter,
+                       mock_check_drive, skip_if_no_xattrs)
 from test.unit.obj.common import write_diskfile
 
 
@@ -42,19 +43,18 @@ from test.unit.obj.common import write_diskfile
 class TestReceiver(unittest.TestCase):
 
     def setUp(self):
+        skip_if_no_xattrs()
         utils.HASH_PATH_SUFFIX = 'endcap'
         utils.HASH_PATH_PREFIX = 'startcap'
         # Not sure why the test.unit stuff isn't taking effect here; so I'm
         # reinforcing it.
-        diskfile.getxattr = unit._getxattr
-        diskfile.setxattr = unit._setxattr
         self.testdir = os.path.join(
             tempfile.mkdtemp(), 'tmp_test_ssync_receiver')
         utils.mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))
         self.conf = {
             'devices': self.testdir,
             'mount_check': 'false',
-            'replication_one_per_device': 'false',
+            'replication_concurrency_per_device': '0',
             'log_requests': 'false'}
         utils.mkdirs(os.path.join(self.testdir, 'device', 'partition'))
         self.controller = server.ObjectController(self.conf)
@@ -370,8 +370,7 @@ class TestReceiver(unittest.TestCase):
                 mock.patch.object(
                     self.controller._diskfile_router[POLICIES.legacy],
                     'mount_check', False), \
-                mock.patch('swift.obj.diskfile.check_mount',
-                           return_value=False) as mocked_check_mount:
+                mock_check_drive(isdir=True) as mocks:
             req = swob.Request.blank(
                 '/device/partition', environ={'REQUEST_METHOD': 'SSYNC'})
             resp = req.get_response(self.controller)
@@ -379,14 +378,13 @@ class TestReceiver(unittest.TestCase):
                 self.body_lines(resp.body),
                 [':ERROR: 0 "Looking for :MISSING_CHECK: START got \'\'"'])
             self.assertEqual(resp.status_int, 200)
-            self.assertFalse(mocked_check_mount.called)
+            self.assertEqual([], mocks['ismount'].call_args_list)
 
         with mock.patch.object(self.controller, 'replication_semaphore'), \
                 mock.patch.object(
                     self.controller._diskfile_router[POLICIES.legacy],
                     'mount_check', True), \
-                mock.patch('swift.obj.diskfile.check_mount',
-                           return_value=False) as mocked_check_mount:
+                mock_check_drive(ismount=False) as mocks:
             req = swob.Request.blank(
                 '/device/partition', environ={'REQUEST_METHOD': 'SSYNC'})
             resp = req.get_response(self.controller)
@@ -396,12 +394,12 @@ class TestReceiver(unittest.TestCase):
                  "was not enough space to save the resource. Drive: "
                  "device</p></html>"])
             self.assertEqual(resp.status_int, 507)
-            mocked_check_mount.assert_called_once_with(
+            self.assertEqual([mock.call(os.path.join(
                 self.controller._diskfile_router[POLICIES.legacy].devices,
-                'device')
+                'device'))], mocks['ismount'].call_args_list)
 
-            mocked_check_mount.reset_mock()
-            mocked_check_mount.return_value = True
+            mocks['ismount'].reset_mock()
+            mocks['ismount'].return_value = True
             req = swob.Request.blank(
                 '/device/partition', environ={'REQUEST_METHOD': 'SSYNC'})
             resp = req.get_response(self.controller)
@@ -409,9 +407,9 @@ class TestReceiver(unittest.TestCase):
                 self.body_lines(resp.body),
                 [':ERROR: 0 "Looking for :MISSING_CHECK: START got \'\'"'])
             self.assertEqual(resp.status_int, 200)
-            mocked_check_mount.assert_called_once_with(
+            self.assertEqual([mock.call(os.path.join(
                 self.controller._diskfile_router[POLICIES.legacy].devices,
-                'device')
+                'device'))], mocks['ismount'].call_args_list)
 
     def test_SSYNC_Exception(self):
 
@@ -1964,6 +1962,7 @@ class TestSsyncRxServer(unittest.TestCase):
     # server socket.
 
     def setUp(self):
+        skip_if_no_xattrs()
         # dirs
         self.tmpdir = tempfile.mkdtemp()
         self.tempdir = os.path.join(self.tmpdir, 'tmp_test_obj_server')

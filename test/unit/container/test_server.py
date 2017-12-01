@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Copyright (c) 2010-2012 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,7 +22,6 @@ import itertools
 from contextlib import contextmanager
 from shutil import rmtree
 from tempfile import mkdtemp
-from test.unit import FakeLogger
 from time import gmtime
 from xml.dom import minidom
 import time
@@ -41,7 +41,7 @@ from swift.container import server as container_server
 from swift.common import constraints
 from swift.common.utils import (Timestamp, mkdirs, public, replication,
                                 storage_directory, lock_parent_directory)
-from test.unit import fake_http_connect, debug_logger
+from test.unit import fake_http_connect, debug_logger, mock_check_drive
 from swift.common.storage_policy import (POLICIES, StoragePolicy)
 from swift.common.request_helpers import get_sys_meta_prefix
 
@@ -61,17 +61,18 @@ def save_globals():
 
 @patch_policies
 class TestContainerController(unittest.TestCase):
-    """Test swift.container.server.ContainerController"""
+
     def setUp(self):
-        """Set up for testing swift.object_server.ObjectController"""
-        self.testdir = os.path.join(mkdtemp(),
-                                    'tmp_test_object_server_ObjectController')
+        self.testdir = os.path.join(
+            mkdtemp(), 'tmp_test_container_server_ContainerController')
         mkdirs(self.testdir)
         rmtree(self.testdir)
         mkdirs(os.path.join(self.testdir, 'sda1'))
         mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))
+        self.logger = debug_logger()
         self.controller = container_server.ContainerController(
-            {'devices': self.testdir, 'mount_check': 'false'})
+            {'devices': self.testdir, 'mount_check': 'false'},
+            logger=self.logger)
         # some of the policy tests want at least two policies
         self.assertTrue(len(POLICIES) > 1)
 
@@ -305,21 +306,20 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 400)
 
-    def test_HEAD_insufficient_storage(self):
-        self.controller = container_server.ContainerController(
-            {'devices': self.testdir})
-        req = Request.blank(
-            '/sda-null/p/a/c', environ={'REQUEST_METHOD': 'HEAD',
-                                        'HTTP_X_TIMESTAMP': '1'})
-        resp = req.get_response(self.controller)
-        self.assertEqual(resp.status_int, 507)
-
     def test_HEAD_invalid_content_type(self):
         req = Request.blank(
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'},
             headers={'Accept': 'application/plain'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 406)
+
+    def test_HEAD_invalid_accept(self):
+        req = Request.blank(
+            '/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'Accept': 'application/plain;q'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 400)
+        self.assertEqual(resp.body, '')
 
     def test_HEAD_invalid_format(self):
         format = '%D1%BD%8A9'  # invalid UTF-8; should be %E1%BD%8A9 (E -> D)
@@ -342,6 +342,60 @@ class TestContainerController(unittest.TestCase):
         self.assertEqual(len(resp.headers['Allow'].split(', ')), 7)
         self.assertEqual(resp.headers['Server'],
                          (self.controller.server_type + '/' + swift_version))
+
+    def test_insufficient_storage_mount_check_true(self):
+        conf = {'devices': self.testdir, 'mount_check': 'true'}
+        container_controller = container_server.ContainerController(conf)
+        self.assertTrue(container_controller.mount_check)
+        for method in container_controller.allowed_methods:
+            if method == 'OPTIONS':
+                continue
+            path = '/sda1/p/'
+            if method == 'REPLICATE':
+                path += 'suff'
+            else:
+                path += 'a/c'
+            req = Request.blank(path, method=method,
+                                headers={'x-timestamp': '1'})
+            with mock_check_drive() as mocks:
+                try:
+                    resp = req.get_response(container_controller)
+                    self.assertEqual(resp.status_int, 507)
+                    mocks['ismount'].return_value = True
+                    resp = req.get_response(container_controller)
+                    self.assertNotEqual(resp.status_int, 507)
+                    # feel free to rip out this last assertion...
+                    expected = 2 if method == 'PUT' else 4
+                    self.assertEqual(resp.status_int // 100, expected)
+                except AssertionError as e:
+                    self.fail('%s for %s' % (e, method))
+
+    def test_insufficient_storage_mount_check_false(self):
+        conf = {'devices': self.testdir, 'mount_check': 'false'}
+        container_controller = container_server.ContainerController(conf)
+        self.assertFalse(container_controller.mount_check)
+        for method in container_controller.allowed_methods:
+            if method == 'OPTIONS':
+                continue
+            path = '/sda1/p/'
+            if method == 'REPLICATE':
+                path += 'suff'
+            else:
+                path += 'a/c'
+            req = Request.blank(path, method=method,
+                                headers={'x-timestamp': '1'})
+            with mock_check_drive() as mocks:
+                try:
+                    resp = req.get_response(container_controller)
+                    self.assertEqual(resp.status_int, 507)
+                    mocks['isdir'].return_value = True
+                    resp = req.get_response(container_controller)
+                    self.assertNotEqual(resp.status_int, 507)
+                    # feel free to rip out this last assertion...
+                    expected = 2 if method == 'PUT' else 4
+                    self.assertEqual(resp.status_int // 100, expected)
+                except AssertionError as e:
+                    self.fail('%s for %s' % (e, method))
 
     def test_PUT(self):
         req = Request.blank(
@@ -813,15 +867,6 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 400)
 
-    def test_PUT_insufficient_storage(self):
-        self.controller = container_server.ContainerController(
-            {'devices': self.testdir})
-        req = Request.blank(
-            '/sda-null/p/a/c', environ={'REQUEST_METHOD': 'PUT',
-                                        'HTTP_X_TIMESTAMP': '1'})
-        resp = req.get_response(self.controller)
-        self.assertEqual(resp.status_int, 507)
-
     def test_POST_HEAD_metadata(self):
         req = Request.blank(
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
@@ -947,15 +992,6 @@ class TestContainerController(unittest.TestCase):
                             headers={'X-Timestamp': 'not-float'})
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 400)
-
-    def test_POST_insufficient_storage(self):
-        self.controller = container_server.ContainerController(
-            {'devices': self.testdir})
-        req = Request.blank(
-            '/sda-null/p/a/c', environ={'REQUEST_METHOD': 'POST',
-                                        'HTTP_X_TIMESTAMP': '1'})
-        resp = req.get_response(self.controller)
-        self.assertEqual(resp.status_int, 507)
 
     def test_POST_invalid_container_sync_to(self):
         self.controller = container_server.ContainerController(
@@ -1269,22 +1305,6 @@ class TestContainerController(unittest.TestCase):
         self.assertFalse(os.path.exists(db_link))
         sync_containers = [c for c in sync_store.synced_containers_generator()]
         self.assertFalse(sync_containers)
-
-    def test_REPLICATE_insufficient_storage(self):
-        conf = {'devices': self.testdir, 'mount_check': 'true'}
-        self.container_controller = container_server.ContainerController(
-            conf)
-
-        def fake_check_mount(*args, **kwargs):
-            return False
-
-        with mock.patch("swift.common.constraints.check_mount",
-                        fake_check_mount):
-            req = Request.blank('/sda1/p/suff',
-                                environ={'REQUEST_METHOD': 'REPLICATE'},
-                                headers={})
-            resp = req.get_response(self.container_controller)
-        self.assertEqual(resp.status_int, 507)
 
     def test_REPLICATE_rsync_then_merge_works(self):
         def fake_rsync_then_merge(self, drive, db_file, args):
@@ -2012,15 +2032,6 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEqual(resp.status_int, 400)
 
-    def test_DELETE_insufficient_storage(self):
-        self.controller = container_server.ContainerController(
-            {'devices': self.testdir})
-        req = Request.blank(
-            '/sda-null/p/a/c', environ={'REQUEST_METHOD': 'DELETE',
-                                        'HTTP_X_TIMESTAMP': '1'})
-        resp = req.get_response(self.controller)
-        self.assertEqual(resp.status_int, 507)
-
     def test_GET_over_limit(self):
         req = Request.blank(
             '/sda1/p/a/c?limit=%d' %
@@ -2110,6 +2121,54 @@ class TestContainerController(unittest.TestCase):
             self.assertEqual(
                 resp.content_type, 'application/json',
                 'Invalid content_type for Accept: %s' % accept)
+
+    def test_GET_non_ascii(self):
+        # make a container
+        req = Request.blank(
+            '/sda1/p/a/jsonc', environ={'REQUEST_METHOD': 'PUT',
+                                        'HTTP_X_TIMESTAMP': '0'})
+        resp = req.get_response(self.controller)
+
+        noodles = [u"Spätzle", u"ラーメン"]
+        for n in noodles:
+            req = Request.blank(
+                '/sda1/p/a/jsonc/%s' % n.encode("utf-8"),
+                environ={'REQUEST_METHOD': 'PUT',
+                         'HTTP_X_TIMESTAMP': '1',
+                         'HTTP_X_CONTENT_TYPE': 'text/plain',
+                         'HTTP_X_ETAG': 'x',
+                         'HTTP_X_SIZE': 0})
+            self._update_object_put_headers(req)
+            resp = req.get_response(self.controller)
+            self.assertEqual(resp.status_int, 201)  # sanity check
+
+        json_body = [{"name": noodles[0],
+                      "hash": "x",
+                      "bytes": 0,
+                      "content_type": "text/plain",
+                      "last_modified": "1970-01-01T00:00:01.000000"},
+                     {"name": noodles[1],
+                      "hash": "x",
+                      "bytes": 0,
+                      "content_type": "text/plain",
+                      "last_modified": "1970-01-01T00:00:01.000000"}]
+
+        # JSON
+        req = Request.blank(
+            '/sda1/p/a/jsonc?format=json',
+            environ={'REQUEST_METHOD': 'GET'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 200)  # sanity check
+        self.assertEqual(json.loads(resp.body), json_body)
+
+        # Plain text
+        text_body = u''.join(n + u"\n" for n in noodles).encode('utf-8')
+        req = Request.blank(
+            '/sda1/p/a/jsonc?format=text',
+            environ={'REQUEST_METHOD': 'GET'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 200)  # sanity check
+        self.assertEqual(resp.body, text_body)
 
     def test_GET_plain(self):
         # make a container
@@ -2317,6 +2376,14 @@ class TestContainerController(unittest.TestCase):
         self.assertEqual(resp.content_type, 'text/xml')
         self.assertEqual(resp.body, xml_body)
 
+    def test_GET_invalid_accept(self):
+        req = Request.blank(
+            '/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'},
+            headers={'Accept': 'application/plain;q'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 400)
+        self.assertEqual(resp.body, 'Invalid Accept header')
+
     def test_GET_marker(self):
         # make a container
         req = Request.blank(
@@ -2495,6 +2562,39 @@ class TestContainerController(unittest.TestCase):
              {"subdir": "US-TX-"},
              {"subdir": "US-UT-"}])
 
+    def test_GET_delimiter_non_ascii(self):
+        req = Request.blank(
+            '/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
+                                    'HTTP_X_TIMESTAMP': '0'})
+        resp = req.get_response(self.controller)
+        for obj_name in [u"a/❥/1", u"a/❥/2", u"a/ꙮ/1", u"a/ꙮ/2"]:
+            req = Request.blank(
+                '/sda1/p/a/c/%s' % obj_name.encode('utf-8'),
+                environ={
+                    'REQUEST_METHOD': 'PUT', 'HTTP_X_TIMESTAMP': '1',
+                    'HTTP_X_CONTENT_TYPE': 'text/plain', 'HTTP_X_ETAG': 'x',
+                    'HTTP_X_SIZE': 0})
+            self._update_object_put_headers(req)
+            resp = req.get_response(self.controller)
+            self.assertEqual(resp.status_int, 201)
+
+        # JSON
+        req = Request.blank(
+            '/sda1/p/a/c?prefix=a/&delimiter=/&format=json',
+            environ={'REQUEST_METHOD': 'GET'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(
+            json.loads(resp.body),
+            [{"subdir": u"a/❥/"},
+             {"subdir": u"a/ꙮ/"}])
+
+        # Plain text
+        req = Request.blank(
+            '/sda1/p/a/c?prefix=a/&delimiter=/&format=text',
+            environ={'REQUEST_METHOD': 'GET'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.body, u"a/❥/\na/ꙮ/\n".encode("utf-8"))
+
     def test_GET_leading_delimiter(self):
         req = Request.blank(
             '/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT',
@@ -2602,15 +2702,6 @@ class TestContainerController(unittest.TestCase):
              {"name": "US/TX", "hash": "x", "bytes": 0,
               "content_type": "text/plain",
               "last_modified": "1970-01-01T00:00:01.000000"}])
-
-    def test_GET_insufficient_storage(self):
-        self.controller = container_server.ContainerController(
-            {'devices': self.testdir})
-        req = Request.blank(
-            '/sda-null/p/a/c', environ={'REQUEST_METHOD': 'GET',
-                                        'HTTP_X_TIMESTAMP': '1'})
-        resp = req.get_response(self.controller)
-        self.assertEqual(resp.status_int, 507)
 
     def test_through_call(self):
         inbuf = BytesIO()
@@ -3104,7 +3195,6 @@ class TestContainerController(unittest.TestCase):
             self.assertEqual(self.logger.get_lines_for_level('info'), [])
 
     def test_GET_log_requests_true(self):
-        self.controller.logger = FakeLogger()
         self.controller.log_requests = True
 
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
@@ -3113,7 +3203,6 @@ class TestContainerController(unittest.TestCase):
         self.assertTrue(self.controller.logger.log_dict['info'])
 
     def test_GET_log_requests_false(self):
-        self.controller.logger = FakeLogger()
         self.controller.log_requests = False
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
@@ -3124,19 +3213,18 @@ class TestContainerController(unittest.TestCase):
         req = Request.blank(
             '/sda1/p/a/c',
             environ={'REQUEST_METHOD': 'HEAD', 'REMOTE_ADDR': '1.2.3.4'})
-        self.controller.logger = FakeLogger()
-        with mock.patch(
-                'time.gmtime', mock.MagicMock(side_effect=[gmtime(10001.0)])):
-            with mock.patch(
-                    'time.time',
-                    mock.MagicMock(side_effect=[10000.0, 10001.0, 10002.0])):
-                with mock.patch(
-                        'os.getpid', mock.MagicMock(return_value=1234)):
-                    req.get_response(self.controller)
-        self.assertEqual(
-            self.controller.logger.log_dict['info'],
-            [(('1.2.3.4 - - [01/Jan/1970:02:46:41 +0000] "HEAD /sda1/p/a/c" '
-             '404 - "-" "-" "-" 2.0000 "-" 1234 0',), {})])
+        with mock.patch('time.gmtime',
+                        mock.MagicMock(side_effect=[gmtime(10001.0)])), \
+                mock.patch('time.time',
+                           mock.MagicMock(side_effect=[
+                               10000.0, 10001.0, 10002.0])), \
+                mock.patch('os.getpid', mock.MagicMock(return_value=1234)):
+            req.get_response(self.controller)
+        info_lines = self.controller.logger.get_lines_for_level('info')
+        self.assertEqual(info_lines, [
+            '1.2.3.4 - - [01/Jan/1970:02:46:41 +0000] "HEAD /sda1/p/a/c" '
+            '404 - "-" "-" "-" 2.0000 "-" 1234 0',
+        ])
 
 
 @patch_policies([
