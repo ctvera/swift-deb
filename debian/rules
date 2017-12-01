@@ -48,7 +48,7 @@ override_dh_install:
 		debian/gen-systemd-unit $$i ; \
 	done
 
-	dh_install --fail-missing
+	dh_install
 	rm -rf debian/python-swift/usr/lib/python*/dist-packages/test
 
 gen-init-configurations:
@@ -87,3 +87,6 @@ override_dh_installdocs:
 	dh_installdocs
 
 	dh_installdocs -A AUTHORS
+
+override_dh_missing:
+	dh_missing --fail-missing
