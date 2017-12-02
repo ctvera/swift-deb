@@ -1,3 +1,9 @@
+swift (2.15.1-6) UNRELEASED; urgency=medium
+
+  * d/swift-container-generator: Remove container-reconciler
+
+ -- Ondřej Nový <onovy@debian.org>  Sat, 02 Dec 2017 22:45:07 +0100
+
 swift (2.15.1-5) unstable; urgency=medium
 
   * Create /var/log/swift and /var/lib/swift only during postinst
