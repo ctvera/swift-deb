@@ -10,6 +10,15 @@ swift (2.16.0-1) UNRELEASED; urgency=medium
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 01 Dec 2017 10:37:04 +0100
 
+swift (2.15.1-4) unstable; urgency=medium
+
+  * Use tmpfiles.d, CacheDirectory and RuntimeDirectory instead of
+    ExecStartPre
+  * Set owner of /var/log/swift to root
+  * d/tests/daemon: Require isolation-container
+
+ -- Ondřej Nový <onovy@debian.org>  Sat, 02 Dec 2017 15:04:11 +0100
+
 swift (2.15.1-3) unstable; urgency=medium
 
   * d/copyright: Add missing copyright holders
