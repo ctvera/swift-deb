@@ -10,6 +10,15 @@ swift (2.16.0-1) UNRELEASED; urgency=medium
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 01 Dec 2017 10:37:04 +0100
 
+swift (2.15.1-5) unstable; urgency=medium
+
+  * Create /var/log/swift and /var/lib/swift only during postinst
+  * Change WorkingDirectory to ~
+  * Use pkgos_var_user_group instead of pkgos_adduser in postinst
+  * Create /var/cache/swift in SysV init script
+
+ -- Ondřej Nový <onovy@debian.org>  Sat, 02 Dec 2017 19:45:07 +0100
+
 swift (2.15.1-4) unstable; urgency=medium
 
   * Use tmpfiles.d, CacheDirectory and RuntimeDirectory instead of
