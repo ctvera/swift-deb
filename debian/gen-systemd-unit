@@ -38,9 +38,9 @@ $AFTER
 [Service]
 User=${SYSTEM_USER}
 Group=${SYSTEM_GROUP}
-WorkingDirectory=/run/swift
-CacheDirectory=swift
-RuntimeDirectory=swift
+WorkingDirectory=~
+CacheDirectory=${PROJECT_NAME}
+RuntimeDirectory=${PROJECT_NAME} lock/${PROJECT_NAME}
 ExecStart=/usr/bin/${NAME} /etc/${PROJECT_NAME}/${CONFIG}.conf
 Restart=on-failure
 LimitNOFILE=65535
@@ -72,9 +72,9 @@ $AFTER
 [Service]
 User=${SYSTEM_USER}
 Group=${SYSTEM_GROUP}
-WorkingDirectory=/run/swift
-CacheDirectory=swift
-RuntimeDirectory=swift lock/swift
+WorkingDirectory=~
+CacheDirectory=${PROJECT_NAME}
+RuntimeDirectory=${PROJECT_NAME} lock/${PROJECT_NAME}
 ExecStart=/usr/bin/${NAME} /etc/${PROJECT_NAME}/${CONFIG}/%i.conf
 Restart=on-failure
 LimitNOFILE=65535
