@@ -26,7 +26,7 @@ if [ `whoami` = "root" ] ; then
 
 	for i in log ; do
 		mkdir -p /var/$i/${PROJECT_NAME}
-		chown ${SYSTEM_USER}:adm /var/$i/${PROJECT_NAME}
+		chown root:adm /var/$i/${PROJECT_NAME}
 	done
 fi
 
