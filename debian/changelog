@@ -1,4 +1,4 @@
-swift (2.16.0-1) UNRELEASED; urgency=medium
+swift (2.16.0-1) experimental; urgency=medium
 
   * New upstream release
   * Bump required version of python-cryptography
@@ -7,7 +7,7 @@ swift (2.16.0-1) UNRELEASED; urgency=medium
   * Rebased all patches
   * Remove bin/swift-temp-url
 
- -- Ondřej Nový <onovy@debian.org>  Fri, 01 Dec 2017 10:37:04 +0100
+ -- Ondřej Nový <onovy@debian.org>  Sat, 09 Dec 2017 22:29:12 +0100
 
 swift (2.15.1-6) unstable; urgency=medium
 
