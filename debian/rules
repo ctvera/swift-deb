@@ -59,7 +59,6 @@ gen-init-configurations:
 		cat debian/init-script-template >>$$MYINIT.init ; \
 		debian/gen-systemd-unit $$i ; \
 	done
-	# TODO: Upstart
 
 override_dh_systemd_enable: gen-init-configurations
 	echo "Do nothing"

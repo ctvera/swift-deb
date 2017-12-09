@@ -20,7 +20,7 @@ for NAME in $CONFIG/* ; do
     NAME=${NAME#/}
     NAME=${NAME%.conf}
 
-    for i in container container-auditor container-reconciler container-replicator container-sync container-updater ; do
+    for i in container container-auditor container-replicator container-sync container-updater ; do
         mkdir -p "$GENDIR/swift-$i.service.wants"
         ln -s \
             "$LIBDIR/swift-$i@.service" \

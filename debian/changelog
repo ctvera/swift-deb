@@ -6,9 +6,15 @@ swift (2.16.0-1) UNRELEASED; urgency=medium
     Remove, applied upstream
   * Rebased all patches
   * Remove bin/swift-temp-url
-  * Use dh_missing --fail-missing
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 01 Dec 2017 10:37:04 +0100
+
+swift (2.15.1-6) unstable; urgency=medium
+
+  * d/swift-container-generator: Remove container-reconciler
+  * Use dh_missing --fail-missing
+
+ -- Ondřej Nový <onovy@debian.org>  Sat, 09 Dec 2017 22:00:34 +0100
 
 swift (2.15.1-5) unstable; urgency=medium
 
