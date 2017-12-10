@@ -1,6 +1,7 @@
 swift (2.15.1-7) UNRELEASED; urgency=medium
 
   * Fix wrong logrotate file
+  * Standards-Version is 4.1.2 now (no change)
 
  -- Ondřej Nový <onovy@debian.org>  Sun, 10 Dec 2017 10:09:52 +0100
 
