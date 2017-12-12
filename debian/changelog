@@ -1,3 +1,9 @@
+swift (2.15.1-8) UNRELEASED; urgency=medium
+
+  * Enable autopkgtest-pkg-python testsuite
+
+ -- Ondřej Nový <onovy@debian.org>  Tue, 12 Dec 2017 17:40:50 +0100
+
 swift (2.15.1-7) unstable; urgency=medium
 
   * Fix wrong logrotate file
