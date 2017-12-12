@@ -296,9 +296,9 @@ Depends:
  ${misc:Depends},
  ${python:Depends},
 Replaces:
- swift-object (<< 2.9.0-2~),
+ swift-object (<< 2.15.1-8~),
 Breaks:
- swift-object (<< 2.9.0-2~),
+ swift-object (<< 2.15.1-8~),
 Description: distributed virtual object store - object-expirer
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
