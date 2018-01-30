@@ -1,0 +1,94 @@
+From 97da45953804b781fb355af76cfa91682ce50990 Mon Sep 17 00:00:00 2001
+From: Tim Burke <tim.burke@gmail.com>
+Date: Fri, 18 Aug 2017 00:55:20 +0000
+Subject: [PATCH] Fix more X-Delete-At timing issues
+
+Seen in a gate:
+
+======================================================================
+2017-08-17 23:10:29.662540 | FAIL: test_GET_but_expired (test.unit.obj.test_server.TestObjectController)
+2017-08-17 23:10:29.662577 | ----------------------------------------------------------------------
+2017-08-17 23:10:29.662600 | Traceback (most recent call last):
+2017-08-17 23:10:29.662651 |   File "/home/jenkins/workspace/gate-cross-swift-python27-ubuntu-xenial/test/unit/obj/test_server.py", line 5754, in test_GET_but_expired
+2017-08-17 23:10:29.662677 |     self.assertEqual(resp.status_int, 201)
+2017-08-17 23:10:29.662697 | AssertionError: 400 != 201
+2017-08-17 23:10:29.662729 | -------------------- >> begin captured stdout << ---------------------
+2017-08-17 23:10:29.662769 | test INFO: None - - [17/Aug/2017:23:08:45 +0000] "PUT /sda1/p/a/c/o" 201 - "-" "-" "-" 0.0072 "-" 6413 -
+2017-08-17 23:10:29.662811 | test INFO: None - - [17/Aug/2017:23:08:45 +0000] "GET /sda1/p/a/c/o" 200 4 "-" "-" "-" 0.0011 "-" 6413 -
+2017-08-17 23:10:29.662852 | test INFO: None - - [17/Aug/2017:23:08:45 +0000] "PUT /sda1/p/a/c/o" 400 19 "-" "-" "-" 0.0004 "-" 6413 -
+2017-08-17 23:10:29.662865 |
+2017-08-17 23:10:29.662896 | --------------------- >> end captured stdout << ----------------------
+2017-08-17 23:10:29.662925 |     '400 != 201' = '%s != %s' % (safe_repr(400), safe_repr(201))
+2017-08-17 23:10:29.662956 |     '400 != 201' = self._formatMessage('400 != 201', '400 != 201')
+2017-08-17 23:10:29.662981 | >>  raise self.failureException('400 != 201')
+
+Change-Id: I643be9af8f054f33897dd74071027a739eaa2c5c
+Related-Change: I10d3b9fcbefff3c415a92fa284a1ea1eda458581
+Related-Bug: #1597520
+---
+
+diff --git a/test/unit/obj/test_server.py b/test/unit/obj/test_server.py
+index b84dc39..2343785 100644
+--- a/test/unit/obj/test_server.py
++++ b/test/unit/obj/test_server.py
+@@ -5750,11 +5750,12 @@
+                      'Content-Length': '4',
+                      'Content-Type': 'application/octet-stream'})
+         req.body = 'TEST'
+-        resp = req.get_response(self.object_controller)
+-        self.assertEqual(resp.status_int, 201)
+ 
+         # fix server time to now: delete-at is in future, verify GET is ok
+         with mock.patch('swift.obj.server.time.time', return_value=now):
++            resp = req.get_response(self.object_controller)
++            self.assertEqual(resp.status_int, 201)
++
+             req = Request.blank(
+                 '/sda1/p/a/c/o',
+                 environ={'REQUEST_METHOD': 'GET'},
+@@ -5807,15 +5808,14 @@
+         resp = req.get_response(self.object_controller)
+         self.assertEqual(resp.status_int, 200)
+ 
+-        orig_time = object_server.time.time
+-        try:
+-            t = time()
+-            delete_at_timestamp = int(t + 1)
++        # fix server time to now: delete-at is in future, verify GET is ok
++        now = time()
++        with mock.patch('swift.obj.server.time.time', return_value=now):
++            delete_at_timestamp = int(now + 1)
+             delete_at_container = str(
+                 delete_at_timestamp /
+                 self.object_controller.expiring_objects_container_divisor *
+                 self.object_controller.expiring_objects_container_divisor)
+-            object_server.time.time = lambda: t
+             put_timestamp = normalize_timestamp(test_time - 1000)
+             req = Request.blank(
+                 '/sda1/p/a/c/o',
+@@ -5834,23 +5834,16 @@
+                 headers={'X-Timestamp': normalize_timestamp(test_time)})
+             resp = req.get_response(self.object_controller)
+             self.assertEqual(resp.status_int, 200)
+-        finally:
+-            object_server.time.time = orig_time
+ 
+-        orig_time = object_server.time.time
+-        try:
+-            t = time() + 2
+-            object_server.time.time = lambda: t
++        with mock.patch('swift.obj.server.time.time', return_value=now + 2):
+             req = Request.blank(
+                 '/sda1/p/a/c/o',
+                 environ={'REQUEST_METHOD': 'HEAD'},
+-                headers={'X-Timestamp': normalize_timestamp(time())})
++                headers={'X-Timestamp': normalize_timestamp(now + 2)})
+             resp = req.get_response(self.object_controller)
+             self.assertEqual(resp.status_int, 404)
+             self.assertEqual(resp.headers['X-Backend-Timestamp'],
+                              utils.Timestamp(put_timestamp))
+-        finally:
+-            object_server.time.time = orig_time
+ 
+     def test_POST_but_expired(self):
+         test_time = time() + 10000

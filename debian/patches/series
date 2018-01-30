@@ -1,3 +1,4 @@
 sphinx_reproducible_build.patch
 syslog_log_name.patch
 Be_more_tolerant_of_exception_messages_from_sqlite.patch
+fix-more-x-delete-at-timing-issues.patch
