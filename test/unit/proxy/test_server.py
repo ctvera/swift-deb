@@ -59,6 +59,7 @@ from test.unit.helpers import setup_servers, teardown_servers
 from swift.proxy import server as proxy_server
 from swift.proxy.controllers.obj import ReplicatedObjectController
 from swift.obj import server as object_server
+from swift.common.bufferedhttp import BufferedHTTPResponse
 from swift.common.middleware import proxy_logging, versioned_writes, \
     copy, listing_formats
 from swift.common.middleware.acl import parse_acl, format_acl
@@ -5328,12 +5329,61 @@ class TestReplicatedObjectController(
                 {'X-Container-Host': '10.0.0.0:1000',
                  'X-Container-Partition': '0',
                  'X-Container-Device': 'sda'},
+                {'X-Container-Host': '10.0.0.1:1001',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sdb'},
+                {'X-Container-Host': None,
+                 'X-Container-Partition': None,
+                 'X-Container-Device': None}])
+
+    def test_PUT_x_container_headers_with_many_object_replicas(self):
+        POLICIES[0].object_ring.set_replicas(11)
+
+        req = Request.blank('/v1/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'Content-Length': '5'}, body='12345')
+        controller = ReplicatedObjectController(
+            self.app, 'a', 'c', 'o')
+        seen_headers = self._gather_x_container_headers(
+            controller.PUT, req,
+            # HEAD HEAD PUT PUT PUT PUT PUT PUT PUT PUT PUT PUT PUT
+            200, 200, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201)
+
+        self.assertEqual(
+            sorted(seen_headers), sorted([
+                {'X-Container-Host': '10.0.0.0:1000',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sda'},
+                {'X-Container-Host': '10.0.0.0:1000',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sda'},
                 {'X-Container-Host': '10.0.0.0:1000',
                  'X-Container-Partition': '0',
                  'X-Container-Device': 'sda'},
                 {'X-Container-Host': '10.0.0.1:1001',
                  'X-Container-Partition': '0',
-                 'X-Container-Device': 'sdb'}])
+                 'X-Container-Device': 'sdb'},
+                {'X-Container-Host': '10.0.0.1:1001',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sdb'},
+                {'X-Container-Host': '10.0.0.2:1002',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sdc'},
+                {'X-Container-Host': '10.0.0.2:1002',
+                 'X-Container-Partition': '0',
+                 'X-Container-Device': 'sdc'},
+                {'X-Container-Host': None,
+                 'X-Container-Partition': None,
+                 'X-Container-Device': None},
+                {'X-Container-Host': None,
+                 'X-Container-Partition': None,
+                 'X-Container-Device': None},
+                {'X-Container-Host': None,
+                 'X-Container-Partition': None,
+                 'X-Container-Device': None},
+                {'X-Container-Host': None,
+                 'X-Container-Partition': None,
+                 'X-Container-Device': None},
+            ]))
 
     def test_PUT_x_container_headers_with_more_container_replicas(self):
         self.app.container_ring.set_replicas(4)
@@ -5436,9 +5486,9 @@ class TestReplicatedObjectController(
              'X-Delete-At-Partition': '0',
              'X-Delete-At-Device': 'sdb'},
             {'X-Delete-At-Host': None,
-             'X-Delete-At-Container': None,
              'X-Delete-At-Partition': None,
-             'X-Delete-At-Device': None}
+             'X-Delete-At-Container': None,
+             'X-Delete-At-Device': None},
         ])
 
     @mock.patch('time.time', new=lambda: STATIC_TIME)
@@ -7168,6 +7218,48 @@ class TestObjectECRangedGET(unittest.TestCase):
         self.assertIn('Content-Range', headers)
         self.assertEqual('bytes */%d' % obj_len, headers['Content-Range'])
 
+    def test_unsatisfiable_socket_leak(self):
+        unclosed_http_responses = {}
+        tracked_responses = [0]
+
+        class LeakTrackingHTTPResponse(BufferedHTTPResponse):
+            def begin(self):
+                # no super(); we inherit from an old-style class (it's
+                # httplib's fault; don't try and fix it).
+                retval = BufferedHTTPResponse.begin(self)
+                if self.status != 204:
+                    # This mock is overly broad and catches account and
+                    # container HEAD requests too. We don't care about
+                    # those; it's the object GETs that were leaky.
+                    #
+                    # Unfortunately, we don't have access to the request
+                    # path here, so we use "status == 204" as a crude proxy
+                    # for "not an object response".
+                    unclosed_http_responses[id(self)] = self
+                    tracked_responses[0] += 1
+                return retval
+
+            def close(self, *args, **kwargs):
+                rv = BufferedHTTPResponse.close(self, *args, **kwargs)
+                unclosed_http_responses.pop(id(self), None)
+                return rv
+
+            def __repr__(self):
+                swift_conn = getattr(self, 'swift_conn', None)
+                method = getattr(swift_conn, '_method', '<unknown>')
+                path = getattr(swift_conn, '_path', '<unknown>')
+                return '%s<method=%r path=%r>' % (
+                    self.__class__.__name__, method, path)
+
+        obj_len = len(self.obj)
+        with mock.patch('swift.common.bufferedhttp.BufferedHTTPConnection'
+                        '.response_class', LeakTrackingHTTPResponse):
+            status, headers, _junk = self._get_obj(
+                "bytes=%d-%d" % (obj_len, obj_len + 100))
+        self.assertEqual(status, 416)  # sanity check
+        self.assertGreater(tracked_responses[0], 0)  # ensure tracking happened
+        self.assertEqual(unclosed_http_responses, {})
+
     def test_off_end(self):
         # Ranged GET that's mostly off the end of the object, but overlaps
         # it in just the last byte
@@ -7551,10 +7643,9 @@ class TestContainerController(unittest.TestCase):
     def assert_status_map(self, method, statuses, expected,
                           raise_exc=False, missing_container=False):
         with save_globals():
-            kwargs = {}
+            kwargs = {'missing_container': missing_container}
             if raise_exc:
                 kwargs['raise_exc'] = raise_exc
-            kwargs['missing_container'] = missing_container
             set_http_connect(*statuses, **kwargs)
             self.app.memcache.store = {}
             req = Request.blank('/v1/a/c', headers={'Content-Length': '0',
@@ -7733,7 +7824,7 @@ class TestContainerController(unittest.TestCase):
             # fail to retrieve account info
             test_status_map(
                 (503, 503, 503),  # account_info fails on 503
-                404, missing_container=True)
+                500, missing_container=True)
             # account fail after creation
             test_status_map(
                 (404, 404, 404,   # account_info fails on 404
@@ -7744,7 +7835,7 @@ class TestContainerController(unittest.TestCase):
                 (503, 503, 404,   # account_info fails on 404
                  503, 503, 503,   # PUT account
                  503, 503, 404),  # account_info fail
-                404, missing_container=True)
+                500, missing_container=True)
             # put fails
             test_status_map(
                 (404, 404, 404,   # account_info fails on 404
@@ -7862,17 +7953,36 @@ class TestContainerController(unittest.TestCase):
                                    missing_container=True)
 
     def test_PUT_max_container_name_length(self):
-        with save_globals():
-            limit = constraints.MAX_CONTAINER_NAME_LENGTH
-            controller = proxy_server.ContainerController(self.app, 'account',
-                                                          '1' * limit)
-            self.assert_status_map(controller.PUT,
-                                   (200, 201, 201, 201), 201,
-                                   missing_container=True)
-            controller = proxy_server.ContainerController(self.app, 'account',
-                                                          '2' * (limit + 1))
-            self.assert_status_map(controller.PUT, (201, 201, 201), 400,
-                                   missing_container=True)
+        limit = constraints.MAX_CONTAINER_NAME_LENGTH
+        controller = proxy_server.ContainerController(self.app, 'account',
+                                                      '1' * limit)
+        self.assert_status_map(controller.PUT, (200, 201, 201, 201), 201,
+                               missing_container=True)
+        controller = proxy_server.ContainerController(self.app, 'account',
+                                                      '2' * (limit + 1))
+        self.assert_status_map(controller.PUT, (), 400,
+                               missing_container=True)
+
+        # internal auto-created-accounts get higher limits
+        limit *= 2
+        controller = proxy_server.ContainerController(self.app, '.account',
+                                                      '3' * limit)
+        self.assert_status_map(controller.PUT, (200, 201, 201, 201), 201,
+                               missing_container=True)
+        controller = proxy_server.ContainerController(self.app, '.account',
+                                                      '4' * (limit + 1))
+        self.assert_status_map(controller.PUT, (), 400,
+                               missing_container=True)
+
+        self.app.auto_create_account_prefix = 'acc'
+        controller = proxy_server.ContainerController(self.app, 'account',
+                                                      '1' * limit)
+        self.assert_status_map(controller.PUT, (200, 201, 201, 201), 201,
+                               missing_container=True)
+        controller = proxy_server.ContainerController(self.app, 'account',
+                                                      '2' * (limit + 1))
+        self.assert_status_map(controller.PUT, (), 400,
+                               missing_container=True)
 
     def test_PUT_connect_exceptions(self):
         with save_globals():
@@ -9001,14 +9111,39 @@ class TestAccountController(unittest.TestCase):
             test_status_map((204, 500, 404), 503)
 
     def test_PUT_max_account_name_length(self):
-        with save_globals():
-            self.app.allow_account_management = True
-            limit = constraints.MAX_ACCOUNT_NAME_LENGTH
-            controller = proxy_server.AccountController(self.app, '1' * limit)
-            self.assert_status_map(controller.PUT, (201, 201, 201), 201)
-            controller = proxy_server.AccountController(
-                self.app, '2' * (limit + 1))
-            self.assert_status_map(controller.PUT, (201, 201, 201), 400)
+        self.app.allow_account_management = True
+        limit = constraints.MAX_ACCOUNT_NAME_LENGTH
+        controller = proxy_server.AccountController(self.app, '1' * limit)
+        self.assert_status_map(controller.PUT, (201, 201, 201), 201)
+        controller = proxy_server.AccountController(
+            self.app, '2' * (limit + 1))
+        self.assert_status_map(controller.PUT, (), 400)
+
+        # internal auto-created accounts get higher limits
+        limit *= 2
+        controller = proxy_server.AccountController(
+            self.app, '.' + '3' * (limit - 1))
+        self.assert_status_map(controller.PUT, (201, 201, 201), 201)
+        controller = proxy_server.AccountController(
+            self.app, '.' + '4' * limit)
+        self.assert_status_map(controller.PUT, (), 400)
+
+        self.app.auto_create_account_prefix = 'FOO_'
+        limit /= 2
+        controller = proxy_server.AccountController(
+            self.app, '.' + '5' * (limit - 1))
+        self.assert_status_map(controller.PUT, (201, 201, 201), 201)
+        controller = proxy_server.AccountController(
+            self.app, '.' + '6' * limit)
+        self.assert_status_map(controller.PUT, (), 400)
+
+        limit *= 2
+        controller = proxy_server.AccountController(
+            self.app, 'FOO_' + '7' * (limit - 4))
+        self.assert_status_map(controller.PUT, (201, 201, 201), 201)
+        controller = proxy_server.AccountController(
+            self.app, 'FOO_' + '8' * (limit - 3))
+        self.assert_status_map(controller.PUT, (), 400)
 
     def test_PUT_connect_exceptions(self):
         with save_globals():

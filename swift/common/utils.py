@@ -17,6 +17,7 @@
 
 from __future__ import print_function
 
+import base64
 import binascii
 import errno
 import fcntl
@@ -28,6 +29,7 @@ import operator
 import os
 import pwd
 import re
+import string
 import struct
 import sys
 import time
@@ -235,9 +237,9 @@ except InvalidHashPathConfigError:
     pass
 
 
-def get_hmac(request_method, path, expires, key):
+def get_hmac(request_method, path, expires, key, digest=sha1):
     """
-    Returns the hexdigest string of the HMAC-SHA1 (RFC 2104) for
+    Returns the hexdigest string of the HMAC (see RFC 2104) for
     the request.
 
     :param request_method: Request method to allow.
@@ -245,11 +247,16 @@ def get_hmac(request_method, path, expires, key):
     :param expires: Unix timestamp as an int for when the URL
                     expires.
     :param key: HMAC shared secret.
+    :param digest: constructor for the digest to use in calculating the HMAC
+                   Defaults to SHA1
 
-    :returns: hexdigest str of the HMAC-SHA1 for the request.
+    :returns: hexdigest str of the HMAC for the request using the specified
+              digest algorithm.
     """
     return hmac.new(
-        key, '%s\n%s\n%s' % (request_method, expires, path), sha1).hexdigest()
+        key,
+        '%s\n%s\n%s' % (request_method, expires, path),
+        digest).hexdigest()
 
 
 # Used by get_swift_info and register_swift_info to store information about
@@ -4339,6 +4346,36 @@ def safe_json_loads(value):
         except (TypeError, ValueError):
             pass
     return None
+
+
+def strict_b64decode(value, allow_line_breaks=False):
+    '''
+    Validate and decode Base64-encoded data.
+
+    The stdlib base64 module silently discards bad characters, but we often
+    want to treat them as an error.
+
+    :param value: some base64-encoded data
+    :param allow_line_breaks: if True, ignore carriage returns and newlines
+    :returns: the decoded data
+    :raises ValueError: if ``value`` is not a string, contains invalid
+                        characters, or has insufficient padding
+    '''
+    if not isinstance(value, six.string_types):
+        raise ValueError
+    # b64decode will silently discard bad characters, but we want to
+    # treat them as an error
+    valid_chars = string.digits + string.ascii_letters + '/+'
+    strip_chars = '='
+    if allow_line_breaks:
+        valid_chars += '\r\n'
+        strip_chars += '\r\n'
+    if any(c not in valid_chars for c in value.strip(strip_chars)):
+        raise ValueError
+    try:
+        return base64.b64decode(value)
+    except (TypeError, binascii.Error):  # (py2 error, py3 error)
+        raise ValueError
 
 
 MD5_BLOCK_READ_BYTES = 4096

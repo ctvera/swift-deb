@@ -909,6 +909,8 @@ objects_per_second  50                  Maximum objects updated per second.
                                         system specs. 0 is unlimited.
 slowdown            0.01                Time in seconds to wait between objects.
                                         Deprecated in favor of objects_per_second.
+report_interval     300                 Interval in seconds between logging
+                                        statistics about the current update pass.
 recon_cache_path    /var/cache/swift    Path to recon cache
 nice_priority       None                Scheduling priority of server processes.
                                         Niceness values range from -20 (most
@@ -1698,11 +1700,6 @@ Proxy Server Configuration
 
 An example Proxy Server configuration can be found at
 etc/proxy-server.conf-sample in the source code repository.
-
-The following configuration sections are available:
-
-An example Account Server configuration can be found at
-etc/account-server.conf-sample in the source code repository.
 
 The following configuration sections are available:
 
