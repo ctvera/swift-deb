@@ -1,5 +1,6 @@
-swift (2.16.0-2) UNRELEASED; urgency=medium
+swift (2.17.0-1) UNRELEASED; urgency=medium
 
+  * New upstream release
   * Sync with unstable
 
  -- Ondřej Nový <onovy@debian.org>  Sun, 10 Dec 2017 10:59:15 +0100
