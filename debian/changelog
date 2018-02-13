@@ -1,6 +1,7 @@
 swift (2.17.0-2) UNRELEASED; urgency=medium
 
   * d/control: Set Vcs-* to salsa.debian.org
+  * Running wrap-and-sort -bast
 
  -- Ondřej Nový <onovy@debian.org>  Mon, 12 Feb 2018 10:32:13 +0100
 
