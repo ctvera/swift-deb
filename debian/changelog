@@ -1,6 +1,7 @@
 swift (2.15.1-9) UNRELEASED; urgency=medium
 
   * Add fix-more-x-delete-at-timing-issues.patch
+  * Add update-test-drop-privs.patch
 
  -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 30 Jan 2018 13:01:54 +0100
 

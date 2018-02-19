@@ -1,0 +1,21 @@
+Description: Drop group comparison from drop_privileges test
+  as it does not appear to be valid.
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/1724342
+Author: Corey Bryant <corey.bryant@canonical.com>
+Origin: https://review.openstack.org/#/c/512797/
+Forwarded: yes
+
+--- a/test/unit/common/test_utils.py
++++ b/test/unit/common/test_utils.py
+@@ -2144,10 +2144,6 @@
+         import pwd
+         self.assertEqual(pwd.getpwnam(user)[5], utils.os.environ['HOME'])
+ 
+-        groups = [g.gr_gid for g in grp.getgrall() if user in g.gr_mem]
+-        groups.append(pwd.getpwnam(user).pw_gid)
+-        self.assertEqual(set(groups), set(os.getgroups()))
+-
+         # reset; test same args, OSError trying to get session leader
+         utils.os = MockOs(called_funcs=required_func_calls,
+                           raise_funcs=('setsid',))
+
