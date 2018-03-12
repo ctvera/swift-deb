@@ -1,0 +1,164 @@
+Description: Fix tests using O_TMPFILE
+ Unit tests using O_TMPFILE only rely on the kernel version to check
+ for the feature. This is wrong, as some filesystem, like tmpfs, doesn't
+ support O_TMPFILE.
+ .
+ So, intead of checking kernel version, this patch actually attemps to
+ open a file using O_TMPFILE and see if that's supported. If not, then
+ the test is skipped.
+Author: Thomas Goirand <zigo@debian.org>
+Date: Mon, 12 Mar 2018 18:07:37 +0100
+Change-Id: I5d652f1634b1ef940838573cfdd799ea17b8b572
+Forwarded: https://review.openstack.org/552093
+Last-Update: 2018-03-12
+
+Index: swift/swift/common/utils.py
+===================================================================
+--- swift.orig/swift/common/utils.py
++++ swift/swift/common/utils.py
+@@ -45,7 +45,7 @@ import ctypes
+ import ctypes.util
+ from optparse import OptionParser
+ 
+-from tempfile import mkstemp, NamedTemporaryFile
++from tempfile import gettempdir, mkstemp, NamedTemporaryFile
+ import glob
+ import itertools
+ import stat
+@@ -4323,6 +4323,45 @@ def modify_priority(conf, logger):
+     _ioprio_set(io_class, io_priority)
+ 
+ 
++def o_tmpfile_in_path_supported(dirpath):
++    if not hasattr(os, 'O_TMPFILE'):
++        return False
++
++    testfile = os.path.join(dirpath, ".o_tmpfile.test")
++
++    hasO_TMPFILE = True
++    fd = None
++    try:
++        fd = os.open(testfile, os.O_CREAT | os.O_WRONLY | os.O_TMPFILE)
++    except OSError as e:
++        if e.errno == errno.EINVAL:
++            print("Path '%(path)s' does not support O_TMPFILE: "
++                  "'%(ex)s'", {'path': dirpath, 'ex': e})
++            hasO_TMPFILE = False
++        else:
++            with excutils.save_and_reraise_exception():
++                print("Error on '%(path)s' while checking "
++                      "O_TMPFILE: '%(ex)s'",
++                      {'path': dirpath, 'ex': e})
++
++    except Exception as e:
++        with excutils.save_and_reraise_exception():
++            print("Error on '%(path)s' while checking O_TMPFILE: "
++                  "'%(ex)s'", {'path': dirpath, 'ex': e})
++
++    finally:
++        if fd is not None:
++            os.close(fd)
++
++        # ensure closing the fd will actually remove the file
++        if os.path.isfile(testfile):
++            return False
++
++    return hasO_TMPFILE
++
++def o_tmpfile_in_tmpdir_supported():
++    return o_tmpfile_in_path_supported(gettempdir())
++
+ def o_tmpfile_supported():
+     """
+     Returns True if O_TMPFILE flag is supported.
+Index: swift/test/unit/__init__.py
+===================================================================
+--- swift.orig/test/unit/__init__.py
++++ swift/test/unit/__init__.py
+@@ -1080,6 +1080,15 @@ class Timeout(object):
+         raise TimeoutException
+ 
+ 
++def requires_o_tmpfile_support_in_tmp(func):
++    @functools.wraps(func)
++    def wrapper(*args, **kwargs):
++        if not utils.o_tmpfile_in_tmpdir_supported():
++            raise SkipTest('Requires O_TMPFILE support in TMPDIR')
++        return func(*args, **kwargs)
++    return wrapper
++
++
+ def requires_o_tmpfile_support(func):
+     @functools.wraps(func)
+     def wrapper(*args, **kwargs):
+Index: swift/test/unit/common/test_linkat.py
+===================================================================
+--- swift.orig/test/unit/common/test_linkat.py
++++ swift/test/unit/common/test_linkat.py
+@@ -25,7 +25,7 @@ from tempfile import gettempdir
+ from swift.common.linkat import linkat
+ from swift.common.utils import O_TMPFILE
+ 
+-from test.unit import requires_o_tmpfile_support
++from test.unit import requires_o_tmpfile_support_in_tmp
+ 
+ 
+ class TestLinkat(unittest.TestCase):
+@@ -38,7 +38,7 @@ class TestLinkat(unittest.TestCase):
+     def test_available(self):
+         self.assertFalse(linkat.available)
+ 
+-    @requires_o_tmpfile_support
++    @requires_o_tmpfile_support_in_tmp
+     def test_errno(self):
+         with open('/dev/null', 'r') as fd:
+             self.assertRaises(IOError, linkat,
+@@ -77,7 +77,7 @@ class TestLinkat(unittest.TestCase):
+         mock_cdll.assert_called_once_with(libc_name, use_errno=True)
+         self.assertTrue(libc.linkat_retrieved)
+ 
+-    @requires_o_tmpfile_support
++    @requires_o_tmpfile_support_in_tmp
+     def test_linkat_success(self):
+ 
+         fd = None
+Index: swift/test/unit/common/test_utils.py
+===================================================================
+--- swift.orig/test/unit/common/test_utils.py
++++ swift/test/unit/common/test_utils.py
+@@ -72,7 +72,7 @@ from swift.common.header_key_dict import
+ from swift.common.storage_policy import POLICIES, reload_storage_policies
+ from swift.common.swob import Request, Response
+ from test.unit import FakeLogger, requires_o_tmpfile_support, \
+-    quiet_eventlet_exceptions
++    requires_o_tmpfile_support_in_tmp, quiet_eventlet_exceptions
+ 
+ threading = eventlet.patcher.original('threading')
+ 
+@@ -3793,7 +3793,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+                 patch('platform.architecture', return_value=('64bit', '')):
+             self.assertRaises(OSError, utils.NR_ioprio_set)
+ 
+-    @requires_o_tmpfile_support
++    @requires_o_tmpfile_support_in_tmp
+     def test_link_fd_to_path_linkat_success(self):
+         tempdir = mkdtemp()
+         fd = os.open(tempdir, utils.O_TMPFILE | os.O_WRONLY)
+@@ -3813,7 +3813,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+             os.close(fd)
+             shutil.rmtree(tempdir)
+ 
+-    @requires_o_tmpfile_support
++    @requires_o_tmpfile_support_in_tmp
+     def test_link_fd_to_path_target_exists(self):
+         tempdir = mkdtemp()
+         # Create and write to a file
+@@ -3848,7 +3848,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+                 self.fail("Expecting IOError exception")
+         self.assertTrue(_m_linkat.called)
+ 
+-    @requires_o_tmpfile_support
++    @requires_o_tmpfile_support_in_tmp
+     def test_linkat_race_dir_not_exists(self):
+         tempdir = mkdtemp()
+         target_dir = os.path.join(tempdir, uuid4().hex)
