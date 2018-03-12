@@ -52,7 +52,6 @@ Depends:
  python-dnspython,
  python-eventlet,
  python-greenlet,
- python-keystonemiddleware,
  python-netifaces,
  python-openssl,
  python-pastedeploy,

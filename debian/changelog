@@ -1,3 +1,9 @@
+swift (2.17.0-4) UNRELEASED; urgency=medium
+
+  * Remove python-keystonemiddleware as runtime depends
+
+ -- Ondřej Nový <onovy@debian.org>  Mon, 12 Mar 2018 22:35:16 +0100
+
 swift (2.17.0-3) unstable; urgency=medium
 
   * Add python-keystonemiddleware as runtime depends.
