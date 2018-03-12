@@ -3,6 +3,7 @@ swift (2.17.0-3) unstable; urgency=medium
   * Add python-keystonemiddleware as runtime depends.
   * Removed versions when satisfied in Stretch.
   * Removed breaks/replaces when transition is already done in Stretch.
+  * Refreshed patches.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 12 Mar 2018 08:58:19 +0000
 
