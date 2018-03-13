@@ -1,10 +1,10 @@
-swift (2.17.0-4) UNRELEASED; urgency=medium
+swift (2.17.0-4) unstable; urgency=medium
 
   * Remove python-keystonemiddleware as runtime depends
   * Add python-keystonemiddleware | swauth as recommends for swift-proxy
   * d/p/Fix_tests_using_O_TMPFILE.patch: Refresh from current upstream review
 
- -- Ondřej Nový <onovy@debian.org>  Tue, 13 Mar 2018 12:26:11 +0100
+ -- Ondřej Nový <onovy@debian.org>  Tue, 13 Mar 2018 13:07:06 +0100
 
 swift (2.17.0-3) unstable; urgency=medium
 
