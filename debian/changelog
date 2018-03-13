@@ -1,8 +1,9 @@
 swift (2.17.0-4) UNRELEASED; urgency=medium
 
   * Remove python-keystonemiddleware as runtime depends
+  * Add python-keystonemiddleware | swauth as recommends for swift-proxy
 
- -- Ondřej Nový <onovy@debian.org>  Mon, 12 Mar 2018 22:35:16 +0100
+ -- Ondřej Nový <onovy@debian.org>  Tue, 13 Mar 2018 12:26:11 +0100
 
 swift (2.17.0-3) unstable; urgency=medium
 

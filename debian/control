@@ -314,6 +314,8 @@ Depends:
  swift (=${binary:Version}),
  ${misc:Depends},
  ${python:Depends},
+Recommends:
+ python-keystonemiddleware | swauth,
 Description: distributed virtual object store - proxy server
  OpenStack Object Storage (code-named Swift) creates redundant, scalable object
  storage using clusters of standardized servers to store petabytes of
