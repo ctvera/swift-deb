@@ -1,22 +1,24 @@
-Description: Fix tests using O_TMPFILE
- Unit tests using O_TMPFILE only rely on the kernel version to check
- for the feature. This is wrong, as some filesystem, like tmpfs, doesn't
- support O_TMPFILE.
- .
- So, intead of checking kernel version, this patch actually attemps to
- open a file using O_TMPFILE and see if that's supported. If not, then
- the test is skipped.
-Author: Thomas Goirand <zigo@debian.org>
+From 59ea3ffe588cd301b0818d6e7abd3f7348a529a5 Mon Sep 17 00:00:00 2001
+From: Thomas Goirand <zigo@debian.org>
 Date: Mon, 12 Mar 2018 18:07:37 +0100
+Subject: [PATCH] Fix tests using O_TMPFILE
+
+Unit tests using O_TMPFILE only rely on the kernel version to check
+for the feature. This is wrong, as some filesystem, like tmpfs, doesn't
+support O_TMPFILE.
+
+So, instead of checking kernel version, this patch actually attempts to
+open a file using O_TMPFILE and see if that's supported. If not, then
+the test is skipped.
+
 Change-Id: I5d652f1634b1ef940838573cfdd799ea17b8b572
 Forwarded: https://review.openstack.org/552093
-Last-Update: 2018-03-12
+Last-Update: 2018-03-13
+---
 
-Index: swift/swift/common/utils.py
-===================================================================
---- swift.orig/swift/common/utils.py
-+++ swift/swift/common/utils.py
-@@ -45,7 +45,7 @@ import ctypes
+--- a/swift/common/utils.py
++++ b/swift/common/utils.py
+@@ -45,7 +45,7 @@
  import ctypes.util
  from optparse import OptionParser
  
@@ -25,7 +27,7 @@ Index: swift/swift/common/utils.py
  import glob
  import itertools
  import stat
-@@ -4323,6 +4323,45 @@ def modify_priority(conf, logger):
+@@ -4323,6 +4323,43 @@
      _ioprio_set(io_class, io_priority)
  
  
@@ -41,19 +43,15 @@ Index: swift/swift/common/utils.py
 +        fd = os.open(testfile, os.O_CREAT | os.O_WRONLY | os.O_TMPFILE)
 +    except OSError as e:
 +        if e.errno == errno.EINVAL:
-+            print("Path '%(path)s' does not support O_TMPFILE: "
-+                  "'%(ex)s'", {'path': dirpath, 'ex': e})
 +            hasO_TMPFILE = False
 +        else:
-+            with excutils.save_and_reraise_exception():
-+                print("Error on '%(path)s' while checking "
-+                      "O_TMPFILE: '%(ex)s'",
-+                      {'path': dirpath, 'ex': e})
++            raise Exception("Error on '%(path)s' while checking "
++                            "O_TMPFILE: '%(ex)s'",
++                            {'path': dirpath, 'ex': e})
 +
 +    except Exception as e:
-+        with excutils.save_and_reraise_exception():
-+            print("Error on '%(path)s' while checking O_TMPFILE: "
-+                  "'%(ex)s'", {'path': dirpath, 'ex': e})
++        raise Exception("Error on '%(path)s' while checking O_TMPFILE: "
++                        "'%(ex)s'", {'path': dirpath, 'ex': e})
 +
 +    finally:
 +        if fd is not None:
@@ -65,17 +63,17 @@ Index: swift/swift/common/utils.py
 +
 +    return hasO_TMPFILE
 +
++
 +def o_tmpfile_in_tmpdir_supported():
 +    return o_tmpfile_in_path_supported(gettempdir())
++
 +
  def o_tmpfile_supported():
      """
      Returns True if O_TMPFILE flag is supported.
-Index: swift/test/unit/__init__.py
-===================================================================
---- swift.orig/test/unit/__init__.py
-+++ swift/test/unit/__init__.py
-@@ -1080,6 +1080,15 @@ class Timeout(object):
+--- a/test/unit/__init__.py
++++ b/test/unit/__init__.py
+@@ -1080,6 +1080,15 @@
          raise TimeoutException
  
  
@@ -91,11 +89,9 @@ Index: swift/test/unit/__init__.py
  def requires_o_tmpfile_support(func):
      @functools.wraps(func)
      def wrapper(*args, **kwargs):
-Index: swift/test/unit/common/test_linkat.py
-===================================================================
---- swift.orig/test/unit/common/test_linkat.py
-+++ swift/test/unit/common/test_linkat.py
-@@ -25,7 +25,7 @@ from tempfile import gettempdir
+--- a/test/unit/common/test_linkat.py
++++ b/test/unit/common/test_linkat.py
+@@ -25,7 +25,7 @@
  from swift.common.linkat import linkat
  from swift.common.utils import O_TMPFILE
  
@@ -104,7 +100,7 @@ Index: swift/test/unit/common/test_linkat.py
  
  
  class TestLinkat(unittest.TestCase):
-@@ -38,7 +38,7 @@ class TestLinkat(unittest.TestCase):
+@@ -38,7 +38,7 @@
      def test_available(self):
          self.assertFalse(linkat.available)
  
@@ -113,7 +109,7 @@ Index: swift/test/unit/common/test_linkat.py
      def test_errno(self):
          with open('/dev/null', 'r') as fd:
              self.assertRaises(IOError, linkat,
-@@ -77,7 +77,7 @@ class TestLinkat(unittest.TestCase):
+@@ -77,7 +77,7 @@
          mock_cdll.assert_called_once_with(libc_name, use_errno=True)
          self.assertTrue(libc.linkat_retrieved)
  
@@ -122,11 +118,9 @@ Index: swift/test/unit/common/test_linkat.py
      def test_linkat_success(self):
  
          fd = None
-Index: swift/test/unit/common/test_utils.py
-===================================================================
---- swift.orig/test/unit/common/test_utils.py
-+++ swift/test/unit/common/test_utils.py
-@@ -72,7 +72,7 @@ from swift.common.header_key_dict import
+--- a/test/unit/common/test_utils.py
++++ b/test/unit/common/test_utils.py
+@@ -72,7 +72,7 @@
  from swift.common.storage_policy import POLICIES, reload_storage_policies
  from swift.common.swob import Request, Response
  from test.unit import FakeLogger, requires_o_tmpfile_support, \
@@ -135,7 +129,7 @@ Index: swift/test/unit/common/test_utils.py
  
  threading = eventlet.patcher.original('threading')
  
-@@ -3793,7 +3793,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+@@ -3793,7 +3793,7 @@
                  patch('platform.architecture', return_value=('64bit', '')):
              self.assertRaises(OSError, utils.NR_ioprio_set)
  
@@ -144,7 +138,7 @@ Index: swift/test/unit/common/test_utils.py
      def test_link_fd_to_path_linkat_success(self):
          tempdir = mkdtemp()
          fd = os.open(tempdir, utils.O_TMPFILE | os.O_WRONLY)
-@@ -3813,7 +3813,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+@@ -3813,7 +3813,7 @@
              os.close(fd)
              shutil.rmtree(tempdir)
  
@@ -153,7 +147,7 @@ Index: swift/test/unit/common/test_utils.py
      def test_link_fd_to_path_target_exists(self):
          tempdir = mkdtemp()
          # Create and write to a file
-@@ -3848,7 +3848,7 @@ cluster_dfw1 = http://dfw1.host/v1/
+@@ -3848,7 +3848,7 @@
                  self.fail("Expecting IOError exception")
          self.assertTrue(_m_linkat.called)
  
