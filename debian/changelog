@@ -1,6 +1,7 @@
 swift (2.17.0-5) UNRELEASED; urgency=medium
 
   * d/tests: Use AUTOPKGTEST_TMP instead of ADTTMP
+  * d/control: Use team+openstack@tracker.debian.org as maintainer
 
  -- Ondřej Nový <onovy@debian.org>  Tue, 17 Apr 2018 13:03:51 +0200
 
