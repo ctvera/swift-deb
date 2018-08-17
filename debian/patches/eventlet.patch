@@ -1,0 +1,189 @@
+commit bf5b49c333906171d9653290baf5a8d16f69b7c8
+Author: Samuel Merritt <sam@swiftstack.com>
+Date:   Thu Oct 12 10:45:12 2017 -0700
+
+    Use "poll" or "selects" Eventlet hub for all Swift daemons.
+    
+    Previously, Swift's WSGI servers, the object replicator, and the
+    object reconstructor were setting Eventlet's hub to either "poll" or
+    "selects", depending on availability. Other daemons were letting
+    Eventlet use its default hub, which is "epoll".
+    
+    In any daemons that fork, we really don't want to use epoll. Epoll
+    instances end up shared between the parent and all children, and you
+    get some awful messes when file descriptors are shared.
+    
+    Here's an example where two processes are trying to wait on the same
+    file descriptor using the same epoll instance, and everything goes
+    wrong:
+    
+    [proc A] epoll_ctl(6, EPOLL_CTL_ADD, 3, ...) = 0
+    
+    [proc B] epoll_ctl(6, EPOLL_CTL_ADD, 3, ...) = -1 EEXIST (File exists)
+    [proc B] epoll_wait(6, ...) = 1
+    [proc B] epoll_ctl(6, EPOLL_CTL_DEL, 3, ...) = 0
+    
+    [proc A] epoll_wait(6, ...)
+    
+    This primarily affects the container updater and object updater since
+    they fork. I've decided to change the hub for all Swift daemons so
+    that we don't add multiprocessing support to some other daemon someday
+    and suffer through this same bug again.
+    
+    This problem was made more apparent by commit 6d16079, which made our
+    logging mutex use file descriptors. However, it could have struck on
+    any shared file descriptor on which a read or write returned EAGAIN.
+    
+    Change-Id: Iebc1491f2ed86ed0db9e7eb0e3277c88076225e1
+
+diff --git a/swift/common/daemon.py b/swift/common/daemon.py
+index 141027cc1..e8e398797 100644
+--- a/swift/common/daemon.py
++++ b/swift/common/daemon.py
+@@ -21,6 +21,7 @@ import signal
+ from re import sub
+ 
+ import eventlet.debug
++from eventlet.hubs import use_hub
+ 
+ from swift.common import utils
+ 
+@@ -266,6 +267,8 @@ def run_daemon(klass, conf_file, section_name='', once=False, **kwargs):
+         # and results in an exit code of 1.
+         sys.exit(e)
+ 
++    use_hub(utils.get_hub())
++
+     # once on command line (i.e. daemonize=false) will over-ride config
+     once = once or not utils.config_true_value(conf.get('daemonize', 'true'))
+ 
+diff --git a/swift/common/utils.py b/swift/common/utils.py
+index 6723b99aa..2d51ef4d8 100644
+--- a/swift/common/utils.py
++++ b/swift/common/utils.py
+@@ -1982,6 +1982,25 @@ def get_hub():
+     getting swallowed somewhere. Then when that file descriptor
+     was re-used, eventlet would freak right out because it still
+     thought it was waiting for activity from it in some other coro.
++
++    Another note about epoll: it's hard to use when forking. epoll works
++    like so:
++
++       * create an epoll instance: efd = epoll_create(...)
++
++       * register file descriptors of interest with epoll_ctl(efd,
++             EPOLL_CTL_ADD, fd, ...)
++
++       * wait for events with epoll_wait(efd, ...)
++
++    If you fork, you and all your child processes end up using the same
++    epoll instance, and everyone becomes confused. It is possible to use
++    epoll and fork and still have a correct program as long as you do the
++    right things, but eventlet doesn't do those things. Really, it can't
++    even try to do those things since it doesn't get notified of forks.
++
++    In contrast, both poll() and select() specify the set of interesting
++    file descriptors with each call, so there's no problem with forking.
+     """
+     try:
+         import select
+diff --git a/swift/obj/reconstructor.py b/swift/obj/reconstructor.py
+index 555ca41fb..445e0cf5d 100644
+--- a/swift/obj/reconstructor.py
++++ b/swift/obj/reconstructor.py
+@@ -26,14 +26,13 @@ import six
+ import six.moves.cPickle as pickle
+ import shutil
+ 
+-from eventlet import (GreenPile, GreenPool, Timeout, sleep, hubs, tpool,
+-                      spawn)
++from eventlet import (GreenPile, GreenPool, Timeout, sleep, tpool, spawn)
+ from eventlet.support.greenlets import GreenletExit
+ 
+ from swift import gettext_ as _
+ from swift.common.utils import (
+     whataremyips, unlink_older_than, compute_eta, get_logger,
+-    dump_recon_cache, mkdirs, config_true_value, list_from_csv, get_hub,
++    dump_recon_cache, mkdirs, config_true_value, list_from_csv,
+     tpool_reraise, GreenAsyncPile, Timestamp, remove_file)
+ from swift.common.header_key_dict import HeaderKeyDict
+ from swift.common.bufferedhttp import http_connect
+@@ -51,9 +50,6 @@ from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
+ SYNC, REVERT = ('sync_only', 'sync_revert')
+ 
+ 
+-hubs.use_hub(get_hub())
+-
+-
+ def _get_partners(frag_index, part_nodes):
+     """
+     Returns the left and right partners of the node whose index is
+diff --git a/swift/obj/replicator.py b/swift/obj/replicator.py
+index cbedf892e..ecf680990 100644
+--- a/swift/obj/replicator.py
++++ b/swift/obj/replicator.py
+@@ -25,7 +25,7 @@ import six.moves.cPickle as pickle
+ from swift import gettext_ as _
+ 
+ import eventlet
+-from eventlet import GreenPool, tpool, Timeout, sleep, hubs
++from eventlet import GreenPool, tpool, Timeout, sleep
+ from eventlet.green import subprocess
+ from eventlet.support.greenlets import GreenletExit
+ 
+@@ -33,7 +33,7 @@ from swift.common.ring.utils import is_local_device
+ from swift.common.utils import whataremyips, unlink_older_than, \
+     compute_eta, get_logger, dump_recon_cache, ismount, \
+     rsync_module_interpolation, mkdirs, config_true_value, list_from_csv, \
+-    get_hub, tpool_reraise, config_auto_int_value, storage_directory
++    tpool_reraise, config_auto_int_value, storage_directory
+ from swift.common.bufferedhttp import http_connect
+ from swift.common.daemon import Daemon
+ from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
+@@ -43,8 +43,6 @@ from swift.common.storage_policy import POLICIES, REPL_POLICY
+ 
+ DEFAULT_RSYNC_TIMEOUT = 900
+ 
+-hubs.use_hub(get_hub())
+-
+ 
+ def _do_listdir(partition, replication_cycle):
+     return (((partition + replication_cycle) % 10) == 0)
+diff --git a/test/unit/common/test_daemon.py b/test/unit/common/test_daemon.py
+index c9ec89bc2..a98f291f1 100644
+--- a/test/unit/common/test_daemon.py
++++ b/test/unit/common/test_daemon.py
+@@ -139,13 +139,16 @@ class TestRunDaemon(unittest.TestCase):
+ 
+     def test_run_daemon(self):
+         sample_conf = "[my-daemon]\nuser = %s\n" % getuser()
+-        with tmpfile(sample_conf) as conf_file:
+-            with mock.patch.dict('os.environ', {'TZ': ''}):
+-                with mock.patch('time.tzset') as mock_tzset:
+-                    daemon.run_daemon(MyDaemon, conf_file)
+-                    self.assertTrue(MyDaemon.forever_called)
+-                    self.assertEqual(os.environ['TZ'], 'UTC+0')
+-                    self.assertEqual(mock_tzset.mock_calls, [mock.call()])
++        with tmpfile(sample_conf) as conf_file, \
++                mock.patch('swift.common.daemon.use_hub') as mock_use_hub:
++            with mock.patch.dict('os.environ', {'TZ': ''}), \
++                    mock.patch('time.tzset') as mock_tzset:
++                daemon.run_daemon(MyDaemon, conf_file)
++                self.assertTrue(MyDaemon.forever_called)
++                self.assertEqual(os.environ['TZ'], 'UTC+0')
++                self.assertEqual(mock_tzset.mock_calls, [mock.call()])
++                self.assertEqual(mock_use_hub.mock_calls,
++                                 [mock.call(utils.get_hub())])
+             daemon.run_daemon(MyDaemon, conf_file, once=True)
+             self.assertEqual(MyDaemon.once_called, True)
+ 
+@@ -182,7 +185,8 @@ class TestRunDaemon(unittest.TestCase):
+             self.assertEqual(18000, time.timezone)
+ 
+             sample_conf = "[my-daemon]\nuser = %s\n" % getuser()
+-            with tmpfile(sample_conf) as conf_file:
++            with tmpfile(sample_conf) as conf_file, \
++                    mock.patch('swift.common.daemon.use_hub'):
+                 daemon.run_daemon(MyDaemon, conf_file)
+                 self.assertFalse(MyDaemon.once_called)
+                 self.assertTrue(MyDaemon.forever_called)

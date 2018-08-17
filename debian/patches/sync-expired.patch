@@ -1,0 +1,63 @@
+commit 2e0ca543e8c74fa7e99d79cdd6e8509c58e7dad3
+Author: Clay Gerrard <clay.gerrard@gmail.com>
+Date:   Fri Aug 25 14:15:03 2017 -0700
+
+    Make X-Backend-Replication consistent for HEAD
+    
+    Current an X-Backend-Replication GET request for an expired object will
+    still open the expired datafile and return the object, but HEAD request
+    with the same headers will 404.  This can lead to some bad assumptions
+    in probetests and other places where we make direct HEAD requests
+    
+    N.B. Because SSYNC replication does not make any HEAD requests this
+    change is immaterial to the correctness of the consistency engine.
+    
+    Related-Change-Id: I7f90b732c3268cb852b64f17555c631d668044a8
+    Change-Id: Idc01970b37d1b77e1d48f9c4f4979f63ee771093
+
+diff --git a/swift/obj/server.py b/swift/obj/server.py
+index 9a50b66bb..88853831c 100644
+--- a/swift/obj/server.py
++++ b/swift/obj/server.py
+@@ -972,7 +972,9 @@ class ObjectController(BaseStorageServer):
+         try:
+             disk_file = self.get_diskfile(
+                 device, partition, account, container, obj,
+-                policy=policy, frag_prefs=frag_prefs)
++                policy=policy, frag_prefs=frag_prefs,
++                open_expired=config_true_value(
++                    request.headers.get('x-backend-replication', 'false')))
+         except DiskFileDeviceUnavailable:
+             return HTTPInsufficientStorage(drive=device, request=request)
+         try:
+diff --git a/test/unit/obj/test_server.py b/test/unit/obj/test_server.py
+index 234378554..9ee2df176 100644
+--- a/test/unit/obj/test_server.py
++++ b/test/unit/obj/test_server.py
+@@ -5774,14 +5774,18 @@ class TestObjectController(unittest.TestCase):
+             self.assertEqual(resp.headers['X-Backend-Timestamp'],
+                              utils.Timestamp(put_timestamp))
+             # ...unless X-Backend-Replication is sent
+-            req = Request.blank(
+-                '/sda1/p/a/c/o',
+-                environ={'REQUEST_METHOD': 'GET'},
+-                headers={'X-Timestamp': normalize_timestamp(now + 2),
+-                         'X-Backend-Replication': 'True'})
+-            resp = req.get_response(self.object_controller)
+-            self.assertEqual(resp.status_int, 200)
+-            self.assertEqual('TEST', resp.body)
++            expected = {
++                'GET': 'TEST',
++                'HEAD': '',
++            }
++            for meth, expected_body in expected.items():
++                req = Request.blank(
++                    '/sda1/p/a/c/o', method=meth,
++                    headers={'X-Timestamp': normalize_timestamp(now + 2),
++                             'X-Backend-Replication': 'True'})
++                resp = req.get_response(self.object_controller)
++                self.assertEqual(resp.status_int, 200)
++                self.assertEqual(expected_body, resp.body)
+ 
+     def test_HEAD_but_expired(self):
+         test_time = time() + 10000

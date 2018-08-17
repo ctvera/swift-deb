@@ -3,3 +3,8 @@ syslog_log_name.patch
 Be_more_tolerant_of_exception_messages_from_sqlite.patch
 fix-more-x-delete-at-timing-issues.patch
 update-test-drop-privs.patch
+sync-expired.patch
+container-creation-cache-invalidation.patch
+ranges-fix-for-multile-obj-servers.patch
+eventlet.patch
+x-slo-after-post.patch

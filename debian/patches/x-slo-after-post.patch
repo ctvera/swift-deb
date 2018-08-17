@@ -1,0 +1,160 @@
+commit ac85f5dd50b2ba7f22dd40f38fd23d245f58640b
+Author: Clay Gerrard <clay.gerrard@gmail.com>
+Date:   Mon Jun 27 17:31:12 2016 -0700
+
+    Preserve X-Static-Large-Object from .data file after POST
+    
+    You can't modify the X-Static-Large-Object metadata with a POST, an
+    object being a SLO is a property of the .data file.  Revert the change
+    from 4500ff which attempts to correctly handle X-Static-Large-Object
+    metadata on a POST, but is subject to a race if the most recent SLO
+    .data isn't available during the POST.  Instead this change adjusts the
+    reading of metadata such that the X-Static-Large-Object metadata is
+    always preserved from the metadata on the datafile and bleeds through
+    a .meta if any.
+    
+    Closes-bug: #1453807
+    Closes-bug: #1634723
+    
+    Co-Authored-By: Kota Tsuyuzaki <tsuyuzaki.kota@lab.ntt.co.jp>
+    Change-Id: Ie48a38442559229a2993443ab0a04dc84717ca59
+    (cherry picked from commit 36a843be73e2d58c3fe49a049d514b421124bd06)
+
+diff --git a/swift/obj/diskfile.py b/swift/obj/diskfile.py
+index 362b3a3f3..da6c78eb5 100644
+--- a/swift/obj/diskfile.py
++++ b/swift/obj/diskfile.py
+@@ -86,7 +86,8 @@ METADATA_KEY = 'user.swift.metadata'
+ DROP_CACHE_WINDOW = 1024 * 1024
+ # These are system-set metadata keys that cannot be changed with a POST.
+ # They should be lowercase.
+-DATAFILE_SYSTEM_META = set('content-length deleted etag'.split())
++RESERVED_DATAFILE_META = {'content-length', 'deleted', 'etag'}
++DATAFILE_SYSTEM_META = {'x-static-large-object'}
+ DATADIR_BASE = 'objects'
+ ASYNCDIR_BASE = 'async_pending'
+ TMP_BASE = 'tmp'
+@@ -2416,7 +2417,8 @@ class BaseDiskFile(object):
+                 self._merge_content_type_metadata(ctype_file)
+             sys_metadata = dict(
+                 [(key, val) for key, val in self._datafile_metadata.items()
+-                 if key.lower() in DATAFILE_SYSTEM_META
++                 if key.lower() in (RESERVED_DATAFILE_META |
++                                    DATAFILE_SYSTEM_META)
+                  or is_sys_meta('object', key)])
+             self._metadata.update(self._metafile_metadata)
+             self._metadata.update(sys_metadata)
+diff --git a/swift/obj/mem_diskfile.py b/swift/obj/mem_diskfile.py
+index 1764f8a2f..83a730944 100644
+--- a/swift/obj/mem_diskfile.py
++++ b/swift/obj/mem_diskfile.py
+@@ -27,7 +27,7 @@ from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
+     DiskFileCollision, DiskFileDeleted, DiskFileNotOpen
+ from swift.common.request_helpers import is_sys_meta
+ from swift.common.swob import multi_range_iterator
+-from swift.obj.diskfile import DATAFILE_SYSTEM_META
++from swift.obj.diskfile import DATAFILE_SYSTEM_META, RESERVED_DATAFILE_META
+ 
+ 
+ class InMemoryFileSystem(object):
+@@ -433,7 +433,8 @@ class DiskFile(object):
+             # with the object data.
+             immutable_metadata = dict(
+                 [(key, val) for key, val in cur_mdata.items()
+-                 if key.lower() in DATAFILE_SYSTEM_META
++                 if key.lower() in (RESERVED_DATAFILE_META |
++                                    DATAFILE_SYSTEM_META)
+                  or is_sys_meta('object', key)])
+             metadata.update(immutable_metadata)
+             metadata['name'] = self._name
+diff --git a/swift/obj/server.py b/swift/obj/server.py
+index 9a50b66bb..fbb3cf251 100644
+--- a/swift/obj/server.py
++++ b/swift/obj/server.py
+@@ -55,7 +55,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
+     HTTPClientDisconnect, HTTPMethodNotAllowed, Request, Response, \
+     HTTPInsufficientStorage, HTTPForbidden, HTTPException, HTTPConflict, \
+     HTTPServerError
+-from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileRouter
++from swift.obj.diskfile import RESERVED_DATAFILE_META, DiskFileRouter
+ 
+ 
+ def iter_mime_headers_and_bodies(wsgi_input, mime_boundary, read_chunk_size):
+@@ -148,7 +148,7 @@ class ObjectController(BaseStorageServer):
+         ]
+         self.allowed_headers = set()
+         for header in extra_allowed_headers:
+-            if header not in DATAFILE_SYSTEM_META:
++            if header not in RESERVED_DATAFILE_META:
+                 self.allowed_headers.add(header)
+         self.auto_create_account_prefix = \
+             conf.get('auto_create_account_prefix') or '.'
+@@ -526,11 +526,6 @@ class ObjectController(BaseStorageServer):
+                     override = key.lower().replace(override_prefix, 'x-')
+                     update_headers[override] = val
+ 
+-    def _preserve_slo_manifest(self, update_metadata, orig_metadata):
+-        if 'X-Static-Large-Object' in orig_metadata:
+-            update_metadata['X-Static-Large-Object'] = \
+-                orig_metadata['X-Static-Large-Object']
+-
+     @public
+     @timing_stats()
+     def POST(self, request):
+@@ -573,7 +568,6 @@ class ObjectController(BaseStorageServer):
+ 
+         if req_timestamp > orig_timestamp:
+             metadata = {'X-Timestamp': req_timestamp.internal}
+-            self._preserve_slo_manifest(metadata, orig_metadata)
+             metadata.update(val for val in request.headers.items()
+                             if (is_user_meta('object', val[0]) or
+                                 is_object_transient_sysmeta(val[0])))
+diff --git a/test/unit/obj/test_diskfile.py b/test/unit/obj/test_diskfile.py
+index 7038a571a..367788dee 100644
+--- a/test/unit/obj/test_diskfile.py
++++ b/test/unit/obj/test_diskfile.py
+@@ -3143,6 +3143,32 @@ class DiskFileMixin(BaseDiskFileTestMixin):
+             # original sysmeta keys are preserved
+             self.assertEqual('Value1', df._metadata['X-Object-Sysmeta-Key1'])
+ 
++    def test_disk_file_preserves_slo(self):
++        # build an object with some meta (at t0)
++        orig_metadata = {'X-Static-Large-Object': 'True',
++                         'Content-Type': 'text/garbage'}
++        df = self._get_open_disk_file(ts=self.ts().internal,
++                                      extra_metadata=orig_metadata)
++
++        # sanity test
++        with df.open():
++            self.assertEqual('True', df._metadata['X-Static-Large-Object'])
++            if df.policy.policy_type == EC_POLICY:
++                expected = df.policy.pyeclib_driver.get_segment_info(
++                    1024, df.policy.ec_segment_size)['fragment_size']
++            else:
++                expected = 1024
++            self.assertEqual(str(expected), df._metadata['Content-Length'])
++
++        # write some new metadata (fast POST, don't send orig meta, at t0+1s)
++        df = self._simple_get_diskfile()
++        df.write_metadata({'X-Timestamp': self.ts().internal})
++        df = self._simple_get_diskfile()
++        with df.open():
++            # non-fast-post updateable keys are preserved
++            self.assertEqual('text/garbage', df._metadata['Content-Type'])
++            self.assertEqual('True', df._metadata['X-Static-Large-Object'])
++
+     def test_disk_file_reader_iter(self):
+         df, df_data = self._create_test_file('1234567890')
+         quarantine_msgs = []
+diff --git a/test/unit/obj/test_server.py b/test/unit/obj/test_server.py
+index 234378554..daf207688 100644
+--- a/test/unit/obj/test_server.py
++++ b/test/unit/obj/test_server.py
+@@ -346,6 +346,7 @@ class TestObjectController(unittest.TestCase):
+ 
+         req = Request.blank('/sda1/p/a/c/o')
+         resp = req.get_response(self.object_controller)
++        self.assertEqual(resp.status_int, 200)
+         self.assertEqual(dict(resp.headers), {
+             'Content-Type': 'application/x-test',
+             'Content-Length': '6',

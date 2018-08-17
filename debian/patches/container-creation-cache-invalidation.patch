@@ -1,0 +1,32 @@
+commit 69a7be65bee876507513d437e555d4de341fe076
+Author: Thomas Herve <therve@redhat.com>
+Date:   Tue Sep 5 22:42:32 2017 +0200
+
+    Delay cache invalidation during container creation
+    
+    Having the cache being cleared before the PUT request creates a
+    fairly big window where the cache can be inconsistent, if a concurrent
+    GET happens. Let's move the cache clear after the requests to reduce it.
+    
+    Change-Id: I45130cc32ba3a23272c2a67c86b4063000379426
+    Closes-Bug: #1715177
+    (cherry picked from commit 244d7de388e7a62f488e9272efcb9adba8021274)
+
+diff --git a/swift/proxy/controllers/container.py b/swift/proxy/controllers/container.py
+index faa2cdee8..c13095819 100644
+--- a/swift/proxy/controllers/container.py
++++ b/swift/proxy/controllers/container.py
+@@ -177,11 +177,11 @@ class ContainerController(Controller):
+         headers = self._backend_requests(req, len(containers),
+                                          account_partition, accounts,
+                                          policy_index)
+-        clear_info_cache(self.app, req.environ,
+-                         self.account_name, self.container_name)
+         resp = self.make_requests(
+             req, self.app.container_ring,
+             container_partition, 'PUT', req.swift_entity_path, headers)
++        clear_info_cache(self.app, req.environ,
++                         self.account_name, self.container_name)
+         return resp
+ 
+     @public
