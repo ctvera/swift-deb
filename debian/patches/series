@@ -9,3 +9,4 @@ ranges-fix-for-multile-obj-servers.patch
 eventlet.patch
 x-slo-after-post.patch
 fix-time-x-delete-after.patch
+copy-middleware.patch
