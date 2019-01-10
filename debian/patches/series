@@ -10,3 +10,4 @@ eventlet.patch
 x-slo-after-post.patch
 fix-time-x-delete-after.patch
 copy-middleware.patch
+object-expirer-accepts-conflict.patch

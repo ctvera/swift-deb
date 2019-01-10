@@ -1,0 +1,109 @@
+commit 3627b0c0af417d26b7117fe6c116025706ddf694
+Author: Tim Burke <tim.burke@gmail.com>
+Date:   Wed Jan 17 22:07:26 2018 +0000
+
+    object-server can 409 in response to x-if-delete-at
+    
+    Previously, if the expirer had a stale work item (because the object
+    was overwritten or deleted, or some other process handled the delete),
+    then it would keep retrying for reclaim_age, but every time it'd get
+    back a 412.
+    
+    Now, have the object-server be smart enough to say, "I have more recent
+    information than you" and let the expirer accept that as success.
+    
+    Change-Id: I0a94482ed16cb30ce79074e053e6177fe97bcaa9
+
+diff --git a/swift/obj/expirer.py b/swift/obj/expirer.py
+index 012d0f033..fbb39b007 100644
+--- a/swift/obj/expirer.py
++++ b/swift/obj/expirer.py
+@@ -300,9 +300,11 @@ class ObjectExpirer(Daemon):
+                            '<account>/<container>/<object>'
+         :param timestamp: The timestamp the X-Delete-At value must match to
+                           perform the actual delete.
++        :raises UnexpectedResponse: if the delete was unsuccessful and
++                                    should be retried later
+         """
+         path = '/v1/' + urllib.parse.quote(actual_obj.lstrip('/'))
+         self.swift.make_request('DELETE', path,
+                                 {'X-If-Delete-At': str(timestamp),
+                                  'X-Timestamp': str(timestamp)},
+-                                (2,))
++                                (2, HTTP_CONFLICT))
+diff --git a/swift/obj/server.py b/swift/obj/server.py
+index 563ccb986..040b270e6 100644
+--- a/swift/obj/server.py
++++ b/swift/obj/server.py
+@@ -1064,6 +1064,9 @@ class ObjectController(BaseStorageServer):
+             if not orig_timestamp:
+                 # no object found at all
+                 return HTTPNotFound()
++            if orig_timestamp >= req_timestamp:
++                # Found a newer object -- return 409 as work item is stale
++                return HTTPConflict()
+             if orig_delete_at != req_if_delete_at:
+                 return HTTPPreconditionFailed(
+                     request=request,
+diff --git a/test/unit/obj/test_expirer.py b/test/unit/obj/test_expirer.py
+index 9849f6d82..afbe1a377 100644
+--- a/test/unit/obj/test_expirer.py
++++ b/test/unit/obj/test_expirer.py
+@@ -747,6 +747,18 @@ class TestObjectExpirer(TestCase):
+         self.assertRaises(internal_client.UnexpectedResponse,
+                           x.delete_actual_object, '/path/to/object', '1234')
+ 
++    def test_delete_actual_object_returns_expected_409(self):
++        # object was overwritten *after* the original expiration
++
++        def fake_app(env, start_response):
++            start_response('409 Conflict', [('Content-Length', '0')])
++            return []
++
++        internal_client.loadapp = lambda *a, **kw: fake_app
++
++        x = expirer.ObjectExpirer({})
++        x.delete_actual_object('/path/to/object', '1234')
++
+     def test_delete_actual_object_raises_412(self):
+ 
+         def fake_app(env, start_response):
+diff --git a/test/unit/obj/test_server.py b/test/unit/obj/test_server.py
+index 0b6e271b1..ba425182f 100644
+--- a/test/unit/obj/test_server.py
++++ b/test/unit/obj/test_server.py
+@@ -5953,14 +5953,32 @@ class TestObjectController(unittest.TestCase):
+             self.assertFalse(os.path.isfile(objfile))
+ 
+             # make the x-if-delete-at with all the right bits (again)
++            req = Request.blank(
++                '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'DELETE'},
++                headers={'X-Timestamp': delete_at_timestamp,
++                         'X-If-Delete-At': delete_at_timestamp})
++            resp = req.get_response(self.object_controller)
++            self.assertEqual(resp.status_int, 409)
++            self.assertFalse(os.path.isfile(objfile))
++
++            # overwrite with new content
++            req = Request.blank(
++                '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
++                headers={
++                    'X-Timestamp': str(test_time + 100),
++                    'Content-Length': '0',
++                    'Content-Type': 'application/octet-stream'})
++            resp = req.get_response(self.object_controller)
++            self.assertEqual(resp.status_int, 201, resp.body)
++
++            # simulate processing a stale expirer queue entry
+             req = Request.blank(
+                 '/sda1/p/a/c/o',
+                 environ={'REQUEST_METHOD': 'DELETE'},
+                 headers={'X-Timestamp': delete_at_timestamp,
+                          'X-If-Delete-At': delete_at_timestamp})
+             resp = req.get_response(self.object_controller)
+-            self.assertEqual(resp.status_int, 412)
+-            self.assertFalse(os.path.isfile(objfile))
++            self.assertEqual(resp.status_int, 409)
+ 
+             # make the x-if-delete-at for some not found
+             req = Request.blank(
